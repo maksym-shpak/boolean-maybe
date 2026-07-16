@@ -20,11 +20,11 @@ The local application owns Job identity and execution state. The simulator repre
 
 | Area | Current constraint | Deliberately undecided |
 | --- | --- | --- |
-| Language | Python | Package structure and supporting libraries |
+| Language | Python 3.12 (CPython, `>=3.12,<3.13`); packaged with `uv` and Hatchling under a `src/boolean_maybe/` layout; formatting/linting via Ruff, static typing via Pyright, tests via pytest (see ADR-001) | Feature-level supporting libraries |
 | User interface | Command-line application | Exact commands and input/output schemas |
 | External integration | HTTP | Client library and wire schemas |
 | Persistence | Local durable storage | Storage technology, physical schema, and consistency mechanism |
-| Runtime | On-demand local application process with a CLI adapter, plus a separate simulator process | Process launch and packaging details |
+| Runtime | On-demand local application process with a CLI adapter, plus a separate simulator process; the CLI is installed as the `boolean-maybe` console entry point (see ADR-001) | Simulator process launch and packaging details |
 
 ## Architectural Principles
 
@@ -218,4 +218,4 @@ Exact CLI commands, input methods, response schemas, Batch ordering and duplicat
 
 ## Related Architecture Decisions
 
-No ADRs have been accepted yet.
+* `docs/architecture/decisions/001-python-runtime-packaging-and-development-tooling.md` — Python runtime, packaging, and development tooling baseline.

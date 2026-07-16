@@ -1,0 +1,39 @@
+[project]
+name = "boolean-maybe"
+version = "0.1.0"
+description = "A resilient command-line application for submitting and managing jobs through a deliberately unreliable external API."
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[project.scripts]
+boolean-maybe = "boolean_maybe.cli:main"
+
+[build-system]
+requires = ["hatchling==1.31.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/boolean_maybe"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14,<0.15",
+    "pyright[nodejs]>=1.1,<2",
+    "pytest>=8,<9",
+]
+
+[tool.uv]
+build-constraint-dependencies = ["hatchling==1.31.0"]
+
+[tool.ruff]
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
