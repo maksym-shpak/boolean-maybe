@@ -12,7 +12,7 @@ Product intent is defined in `docs/product/product-brief.md`, domain terminology
 
 `boolean-maybe` consists of a short-lived local Python application, exposed through a CLI adapter, and a separate simulated external HTTP service. The CLI adapter accepts Job Entries and invokes application workflows. Those workflows persist authoritative local execution state and communicate with the external service through a dedicated client boundary.
 
-The simulator exposes job submission and reconciliation operations by idempotency key. It deliberately applies deterministic failure scenarios to both operations so the local application must handle retryable failures, ambiguous outcomes, process interruption, and non-authoritative remote evidence.
+The simulator exposes `POST /jobs` for idempotent submission and `GET /jobs/by-idempotency-key/{idempotency_key}` for reconciliation. It deliberately applies deterministic failure scenarios to both operations so the local application must handle retryable failures, ambiguous outcomes, process interruption, and non-authoritative remote evidence.
 
 The local application owns Job identity and execution state. The simulator represents the unreliable external system and does not share the application's persistence or become authoritative for local identity.
 
@@ -22,7 +22,7 @@ The local application owns Job identity and execution state. The simulator repre
 | --- | --- | --- |
 | Language | Python 3.12 (CPython, `>=3.12,<3.13`); packaged with `uv` and Hatchling under a `src/boolean_maybe/` layout; formatting/linting via Ruff, static typing via Pyright, tests via pytest (see ADR-001) | Feature-level supporting libraries |
 | User interface | Command-line application | Exact commands and input/output schemas |
-| External integration | HTTP | Client library and wire schemas |
+| External integration | HTTP submission and reconciliation by idempotency key; RFC 8785 payload equivalence and evidence semantics defined by ADR-003 | Client library and feature-level wire-schema details beyond required evidence |
 | Persistence | Local durable storage | Storage technology, physical schema, and consistency mechanism |
 | Execution model | Synchronous CLI adapter enters one asynchronous application workflow per invocation; domain rules remain synchronous; Batch uses bounded structured concurrency (see ADR-002) | Exact Batch concurrency limit and adapter-specific non-blocking mechanisms |
 | Runtime | On-demand local application process with a CLI adapter, plus a separate simulator process; the CLI is installed as the `boolean-maybe` console entry point (see ADR-001) | Simulator process launch and packaging details |
@@ -105,7 +105,7 @@ Arrows represent allowed runtime dependencies or calls. Application workflows de
 | Reconciliation workflow | Query external evidence by idempotency key and apply only explicit, auditable resolutions allowed by an approved specification. | Implicit retries from `AMBIGUOUS` or unverified reclassification. |
 | Persistence boundary | Durably store and retrieve authoritative local state while preserving required identity, lifecycle, and consistency guarantees. | Independent domain transitions or external HTTP behavior. |
 | External service client | Translate workflow requests and remote observations across the HTTP boundary without assigning stronger certainty than the evidence supports. | Local identity, Job lifecycle decisions, or retry policy ownership. |
-| Simulated external service | Provide idempotent submission and reconciliation by idempotency key and execute deterministic unreliable behaviors for both operations. | Local Job identity, local execution state, CLI behavior, or application persistence. |
+| Simulated external service | Bind idempotency keys to RFC 8785-equivalent Job Entries, provide idempotent `POST /jobs` and reconciliation `GET /jobs/by-idempotency-key/{idempotency_key}`, and execute deterministic unreliable behaviors for both operations. | Local Job identity, local execution state, CLI behavior, application persistence, or scenario outcomes that contradict actual key binding. |
 
 ## Dependency Direction and Boundaries
 
@@ -156,7 +156,15 @@ The CLI passes multiple Job Entries to the Batch workflow. The workflow resolves
 
 ### Reconciliation
 
-The CLI explicitly invokes the reconciliation workflow for an eligible Job. The workflow reads local state, queries the simulator by idempotency key through the external service client, and records only conclusions supported by observed evidence. Because reconciliation is also unreliable, an inconclusive operation preserves ambiguity rather than triggering an implicit submission or inventing a definitive outcome.
+The CLI explicitly invokes the reconciliation workflow for an eligible Job. The workflow reads local state, queries the simulator by idempotency key through the external service client, and records only conclusions supported by observed evidence. A delivered `200 processed` response is authoritative positive evidence only when its key and canonical payload digest match the local Job Entry. A digest mismatch proves a key conflict, not local success. A `404 not_found` response is only a point-in-time negative observation and cannot by itself authorize automatic retry. Because reconciliation is also unreliable, an inconclusive operation preserves ambiguity rather than triggering an implicit submission or inventing a definitive outcome.
+
+### Simulator Contract and Failure Evidence
+
+The first processed submission atomically binds an idempotency key to the RFC 8785 canonical bytes of its complete Job Entry. An equivalent replay returns the stored result without processing again; a non-equivalent reuse returns `409 Conflict` without changing the binding. A SHA-256 canonical payload digest may be exchanged as comparison evidence but is not local identity or a security boundary.
+
+Delivered successful submission or matching `200 processed` reconciliation is definitive positive processing evidence. Delivered `400`, `409`, and `429` responses definitively describe rejection, conflict, or rate limiting for that request. A reconciliation `404`, remote request ID alone, `5xx`, incomplete response, timeout, or disconnect cannot establish a definitive remote outcome. The same `5xx`, timeout, or disconnect may occur before or after remote processing.
+
+Failure scenarios are selected by a simulator-owned deterministic plan using operation, exact key or wildcard, and per-operation/per-key request ordinal. Exact-key entries take precedence over wildcard entries. Per-key serialization preserves deterministic behavior under concurrent Batch execution. Scenario controls remain outside Job Entry and product-facing request fields and cannot override actual idempotency binding or payload equivalence.
 
 ### Recovery After Interruption
 
@@ -171,7 +179,7 @@ A later CLI invocation triggers an application workflow that reads authoritative
 | Job Entry | Job | Immutable after Job creation. |
 | Idempotency key | Job | Generated by the application workflow when not supplied by the user; never derived from payload. |
 | Remote request ID and remote responses | External service, stored locally as evidence | Optional, potentially duplicated, and never authoritative local identity. |
-| Simulator processing state | Simulated external service | Accessible only through submission and reconciliation operations. |
+| Simulator processing state | Simulated external service | Keyed by idempotency key, binds one canonical Job Entry to one processed result, and is accessible only through submission and reconciliation operations. Its reset or retention boundary limits the duration of available evidence. |
 | Batch data | Undecided | Candidate domain concept; persistence and cardinality require later approval. |
 
 ## Runtime and Deployment Model
@@ -200,6 +208,8 @@ Job payloads may contain sensitive user data. Full payloads do not cross into op
 * Do not let persistence or HTTP adapters introduce independent lifecycle transitions.
 * Do not share storage between the application and simulator.
 * Do not use remote request IDs as local identities or uniqueness keys.
+* Do not infer safe retry from reconciliation `404`, a remote request ID, or other non-authoritative evidence.
+* Do not let simulator scenario controls override actual idempotency binding or payload-equivalence semantics.
 * Do not send an external request before the required durable Job and SubmissionAttempt state exists.
 * Do not automatically retry `AMBIGUOUS` Jobs or treat reconciliation as an implicit retry.
 * Do not claim exactly-once remote processing; unreliable idempotency and reconciliation reduce duplicate risk but do not eliminate uncertainty.
@@ -219,10 +229,8 @@ Job payloads may contain sensitive user data. Full payloads do not cross into op
 The following questions require ADRs before affected features are implemented:
 
 * Which local persistence technology is used, and how does it implement the durable consistency boundary between Job state, SubmissionAttempt state, and possible external effects?
-* How is Job Entry equivalence defined, canonicalized, versioned, and represented for idempotency-key conflict detection?
 * What recovery algorithm evaluates Jobs and attempts left in progress after interruption?
 * What timeout, retry-budget, rate-limit, and retry-exhaustion policies govern external operations?
-* What HTTP contracts and evidence semantics govern submission and reconciliation with the simulator?
 * Is Batch persisted, and if so, what are its identity, membership, cardinality, lifecycle, and aggregate-state semantics?
 * What retention and deletion rules apply to authoritative local history and simulator state?
 
@@ -232,3 +240,4 @@ Exact CLI commands, input methods, response schemas, the positive Batch concurre
 
 * `docs/architecture/decisions/001-python-runtime-packaging-and-development-tooling.md` — Python runtime, packaging, and development tooling baseline.
 * `docs/architecture/decisions/002-execution-model-and-application-boundaries.md` — synchronous CLI boundary, asynchronous application workflows, and bounded structured Batch concurrency.
+* `docs/architecture/decisions/003-simulated-external-service-contract.md` — simulator endpoints, idempotency and payload-equivalence rules, reconciliation evidence, and deterministic failure scenarios.

@@ -81,7 +81,9 @@ A Job is identified by `job_id`.
 
 `idempotency_key` is an additional unique logical identity used for duplicate prevention. The CLI generates a key when the user does not provide one, and a user-provided key is preserved. The key must never be derived from the Job Entry payload. Reusing an `idempotency_key` for a non-equivalent Job Entry must be rejected before an external request begins.
 
-The Job Entry equivalence rule and its persisted representation must be defined by the applicable ADR and approved feature specification. Those documents must also define canonicalization and fingerprinting if either is used; neither mechanism is required by this core contract.
+Two Job Entries are equivalent when their complete JSON objects produce identical UTF-8 canonical bytes under RFC 8785, including its I-JSON constraints and verified errata. Object member order and insignificant serialization whitespace do not affect equivalence; array order and distinctions preserved by RFC 8785 do. Input that cannot be represented canonically must be rejected before external processing.
+
+An approved design may compute or persist a SHA-256 digest of the canonical bytes as comparison evidence. Such a digest is derived operational metadata, not authoritative identity or a security boundary, and is not a required `Job` or `SubmissionAttempt` field.
 
 A `remote_request_id` must never replace `job_id` or `idempotency_key`.
 
@@ -148,6 +150,7 @@ Persistence mechanisms may store and retrieve Jobs but must not introduce indepe
 * `job_id` must be unique.
 * `idempotency_key` must be unique within the local persistence store.
 * `payload` must be a JSON object and must not change after Job creation.
+* Job Entry equivalence must use RFC 8785 canonical-byte equality.
 * Reusing an `idempotency_key` for a non-equivalent Job Entry must be rejected before an external request begins.
 * A request matching an existing completed Job must return that Job without creating another SubmissionAttempt or initiating another external request.
 * A Job may have at most one `STARTED` SubmissionAttempt at a time.
@@ -181,7 +184,7 @@ Job payloads may contain sensitive or user-provided data.
 
 * Full payloads must not be written to operational logs by default.
 * Error messages must not expose payload content unnecessarily.
-* Any payload fingerprint introduced by an approved design must be treated as operational metadata, not as a security boundary.
+* Any canonical payload digest introduced by an approved design must be treated as operational metadata, not as authoritative identity or a security boundary.
 * Authentication, authorization, and payload encryption are outside the current product scope.
 
 ### Related Documents
@@ -190,6 +193,7 @@ Job payloads may contain sensitive or user-provided data.
 docs/product/product-brief.md
 docs/product/glossary.md
 docs/architecture/architecture-overview.md
+docs/architecture/decisions/003-simulated-external-service-contract.md
 ```
 
 ---
@@ -326,11 +330,10 @@ Whether Batch is persisted, its fields and lifecycle, resume behavior, input ord
 The following questions must be resolved before implementation of the affected features:
 
 1. What is the exact feature-specific schema of a Job Entry JSON object?
-2. What makes two Job Entries equivalent for reuse of an `idempotency_key`, and what persisted representation, canonicalization, or fingerprinting, if any, supports that rule?
-3. What length, character, and validation rules apply to `idempotency_key`?
-4. Which explicit operations, if any, may transition a Job out of `AMBIGUOUS`?
-5. Which CLI input methods are required for Job Entries?
-6. Is Batch persisted, and what identity, fields, states, resume lifecycle, membership storage, and Job cardinality does it require?
-7. Should Batch processing preserve original input ordering, and how should duplicate entries be represented?
-8. Are aggregate Batch results derived at read time or persisted as snapshots?
-9. What retention or deletion policy applies to Jobs, SubmissionAttempts, and any persisted Batch data?
+2. What length, character, and validation rules apply to `idempotency_key`?
+3. Which explicit operations, if any, may transition a Job out of `AMBIGUOUS`?
+4. Which CLI input methods are required for Job Entries?
+5. Is Batch persisted, and what identity, fields, states, resume lifecycle, membership storage, and Job cardinality does it require?
+6. Should Batch processing preserve original input ordering, and how should duplicate entries be represented?
+7. Are aggregate Batch results derived at read time or persisted as snapshots?
+8. What retention or deletion policy applies to Jobs, SubmissionAttempts, and any persisted Batch data?
