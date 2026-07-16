@@ -3,10 +3,13 @@ name = "boolean-maybe"
 version = "0.1.0"
 description = "A resilient command-line application for submitting and managing jobs through a deliberately unreliable external API."
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    "rfc8785>=0.1.4,<0.2",
+]
 
 [project.scripts]
 boolean-maybe = "boolean_maybe.cli:main"
+boolean-maybe-simulator = "boolean_maybe.simulator.cli:main"
 
 [build-system]
 requires = ["hatchling==1.31.0"]

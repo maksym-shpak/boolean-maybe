@@ -25,7 +25,7 @@ The local application owns Job identity and execution state. The simulator repre
 | External integration | HTTP submission and reconciliation by idempotency key; RFC 8785 evidence semantics from ADR-003 and bounded retry, rate-limit, ambiguity, and recovery policy from ADR-006 | Client library, concrete adapter error mappings, and feature-level wire-schema details beyond required evidence |
 | Persistence | One local SQLite database through the standard-library `sqlite3` adapter; rollback-journal mode, full synchronous durability, explicit short transactions, and multi-process leases/fencing define the consistency boundary (see ADR-004) | Physical schema, exact contention and lease parameters, time-source mechanism, and retention policy |
 | Execution model | Synchronous CLI adapter enters one asynchronous application workflow per invocation; domain rules remain synchronous; Batch uses bounded structured concurrency (see ADR-002) | Exact Batch concurrency limit and adapter-specific non-blocking mechanisms |
-| Runtime | On-demand local application process with a CLI adapter, plus a separate simulator process; the CLI is installed as the `boolean-maybe` console entry point (see ADR-001) | Simulator process launch and packaging details |
+| Runtime | On-demand local application process with a CLI adapter, plus a separate simulator process; the CLI is installed as the `boolean-maybe` console entry point (see ADR-001), and the simulator is installed as the `boolean-maybe-simulator` console entry point per the accepted simulated-external-service feature specification | None beyond what that feature specification defines |
 
 ## Architectural Principles
 
