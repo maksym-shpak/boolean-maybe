@@ -1,0 +1,221 @@
+# Architecture Overview
+
+## Purpose
+
+This document describes the stable high-level architecture of `boolean-maybe`: its runtime boundaries, component responsibilities, dependency direction, important data flows, and ownership of authoritative state.
+
+It intentionally does not select concrete libraries, package layouts, database schemas, class names, CLI commands, HTTP schemas, or retry formulas. Decisions at that level belong to accepted architecture decisions and approved feature specifications.
+
+Product intent is defined in `docs/product/product-brief.md`, domain terminology in `docs/product/glossary.md`, and stable domain contracts in `docs/domain/core-entities.md`.
+
+## System Summary
+
+`boolean-maybe` consists of a short-lived local Python application, exposed through a CLI adapter, and a separate simulated external HTTP service. The CLI adapter accepts Job Entries and invokes application workflows. Those workflows persist authoritative local execution state and communicate with the external service through a dedicated client boundary.
+
+The simulator exposes job submission and reconciliation operations by idempotency key. It deliberately applies deterministic failure scenarios to both operations so the local application must handle retryable failures, ambiguous outcomes, process interruption, and non-authoritative remote evidence.
+
+The local application owns Job identity and execution state. The simulator represents the unreliable external system and does not share the application's persistence or become authoritative for local identity.
+
+## Technology Constraints
+
+| Area | Current constraint | Deliberately undecided |
+| --- | --- | --- |
+| Language | Python | Package structure and supporting libraries |
+| User interface | Command-line application | Exact commands and input/output schemas |
+| External integration | HTTP | Client library and wire schemas |
+| Persistence | Local durable storage | Storage technology, physical schema, and consistency mechanism |
+| Runtime | On-demand local application process with a CLI adapter, plus a separate simulator process | Process launch and packaging details |
+
+## Architectural Principles
+
+1. **Application logic is independent of the CLI.**
+   The CLI translates user input into workflow requests and renders results; it does not own submission, retry, reconciliation, or lifecycle rules.
+
+2. **Local state is authoritative.**
+   The local application owns Job and SubmissionAttempt identity and lifecycle state. Remote responses are evidence, not replacements for local identity.
+
+3. **Durable intent precedes possible external effects.**
+   Before an external request begins, durable state identifies the Job and corresponding SubmissionAttempt and prevents recovery from treating a potentially sent request as unsent.
+
+4. **Uncertainty remains explicit.**
+   Missing or inconclusive remote evidence produces an ambiguous outcome rather than invented success or failure. `AMBIGUOUS` is never retried automatically.
+
+5. **All submission paths use one reliability model.**
+   Single-entry, batch, retry, and reconciliation flows preserve the same Job and SubmissionAttempt invariants.
+
+6. **The simulator remains isolated and deterministic.**
+   It runs separately, owns only simulated remote behavior, and reproduces configured failure scenarios without sharing application state.
+
+## System Context
+
+```mermaid
+flowchart LR
+  User[Operator or Automation] --> CLI[CLI Adapter]
+  CLI --> Workflows[Application Workflows]
+  Workflows --> LocalState[(Local Durable State)]
+  Workflows --> Client[External Service Client]
+  Client -->|HTTP submission and reconciliation| Simulator[Simulated External Service]
+  Simulator --> Scenarios[Deterministic Failure Scenarios]
+```
+
+The operator or automation interacts only with the CLI contract. The local application, through its application workflows, reads and updates local durable state and observes the simulator through HTTP. The CLI adapter does not access persistence or the simulator directly. Local durable state and simulator state are separate; neither process accesses the other's storage directly.
+
+## Component Map
+
+```mermaid
+flowchart TD
+  CLI[CLI Adapter] --> App[Application Workflows]
+
+  App --> Submit[Job Submission Workflow]
+  App --> Batch[Batch Workflow]
+  App --> Reconcile[Reconciliation Workflow]
+
+  Submit --> Persistence[Persistence Boundary]
+  Batch --> Persistence
+  Reconcile --> Persistence
+
+  Submit --> Client[External Service Client]
+  Reconcile --> Client
+
+  Client --> SubmitEndpoint[Simulator: Submission Endpoint]
+  Client --> ReconcileEndpoint[Simulator: Reconciliation Endpoint]
+  SubmitEndpoint --> FailureScenarios[Deterministic Failure Scenarios]
+  ReconcileEndpoint --> FailureScenarios
+
+  Batch --> Submit
+```
+
+Arrows represent allowed runtime dependencies or calls. Application workflows depend on abstract persistence and external-service boundaries, not on their concrete implementations. The simulator is reached only through the external service client and has no dependency on CLI-adapter or application internals.
+
+## Components and Responsibilities
+
+| Component | Responsibilities | Must not own |
+| --- | --- | --- |
+| CLI adapter | Parse inputs, invoke an application workflow, render machine-readable results and documented exit codes. | Job lifecycle rules, retry decisions, persistence operations, or HTTP reliability behavior. |
+| Application workflows | Coordinate use cases and enforce domain contracts across persistence and external interactions. | Transport-specific presentation or physical storage details. |
+| Job submission workflow | Resolve idempotency identity, detect existing Jobs, create and complete SubmissionAttempts, classify observed outcomes, and apply bounded retry semantics. | CLI formatting, batch-specific state, or simulator scenario control. |
+| Batch workflow | Accept multiple Job Entries, coordinate the single-Job submission workflow, preserve Job isolation, and produce aggregate reporting. | A separate submission/retry model or authority over Job state. |
+| Reconciliation workflow | Query external evidence by idempotency key and apply only explicit, auditable resolutions allowed by an approved specification. | Implicit retries from `AMBIGUOUS` or unverified reclassification. |
+| Persistence boundary | Durably store and retrieve authoritative local state while preserving required identity, lifecycle, and consistency guarantees. | Independent domain transitions or external HTTP behavior. |
+| External service client | Translate workflow requests and remote observations across the HTTP boundary without assigning stronger certainty than the evidence supports. | Local identity, Job lifecycle decisions, or retry policy ownership. |
+| Simulated external service | Provide idempotent submission and reconciliation by idempotency key and execute deterministic unreliable behaviors for both operations. | Local Job identity, local execution state, CLI behavior, or application persistence. |
+
+## Dependency Direction and Boundaries
+
+The CLI depends on application workflows. It may not call persistence or the simulator directly.
+
+Application workflows depend on the stable domain contracts and on abstract persistence and external-service boundaries. Concrete storage and HTTP details remain outside workflow logic.
+
+The Batch workflow delegates each eligible Job to the Job submission workflow. Reconciliation is a separate explicit workflow and cannot silently become a retry path.
+
+The persistence implementation and external service client adapt infrastructure to the needs of the workflows. They do not define domain state transitions.
+
+The simulator is an independently running process behind HTTP endpoints. It does not import, call, or share storage with the local application.
+
+## Important Data Flows
+
+### Job Submission
+
+```mermaid
+sequenceDiagram
+  participant C as CLI
+  participant W as Job Submission Workflow
+  participant P as Persistence Boundary
+  participant E as External Service Client
+
+  C->>W: Submit Job Entry and optional idempotency key
+  W->>P: Find or create authoritative Job
+  alt Matching completed Job exists
+    P-->>W: Stored Job and result
+    W-->>C: already_completed, submitted=false
+  else New external attempt is allowed
+    W->>P: Durably record Job and STARTED attempt
+    W->>E: Submit using idempotency key
+    E-->>W: Observed response, failure, or uncertainty
+    W->>P: Persist attempt outcome and Job transition
+    W-->>C: Current result
+  end
+```
+
+The persistence consistency mechanism is deliberately unspecified. Its observable guarantee is that recovery cannot mistake a potentially sent request for one that was never sent.
+
+This sequence is a simplified happy-path boundary view. It does not enumerate every state-dependent outcome, including an existing `SUBMITTING` or `AMBIGUOUS` Job or a `RETRY_SCHEDULED` Job that has not reached its eligibility time.
+
+### Batch Orchestration
+
+The CLI passes multiple Job Entries to the Batch workflow. The workflow resolves each entry to a Job and delegates eligible work to the Job submission workflow. Each Job retains independent authoritative state; failure or ambiguity of one Job cannot alter another Job. Whether Batch itself is persisted and how membership or aggregate results are represented remain deferred decisions.
+
+### Reconciliation
+
+The CLI explicitly invokes the reconciliation workflow for an eligible Job. The workflow reads local state, queries the simulator by idempotency key through the external service client, and records only conclusions supported by observed evidence. Because reconciliation is also unreliable, an inconclusive operation preserves ambiguity rather than triggering an implicit submission or inventing a definitive outcome.
+
+### Recovery After Interruption
+
+A later CLI invocation triggers an application workflow that reads authoritative local state through the persistence boundary. A Job left in `SUBMITTING` cannot become eligible for another external request unless evidence and an approved recovery policy safely exclude prior remote processing. The concrete recovery algorithm is deferred to an ADR and feature specification.
+
+## Data and State Ownership
+
+| Data or state | Authority | Architectural rule |
+| --- | --- | --- |
+| Job and execution state | Local application through the persistence boundary | Authoritative for local identity and lifecycle. |
+| SubmissionAttempt history | Local application through the persistence boundary | Recorded before a possible side effect and append-oriented after completion. |
+| Job Entry | Job | Immutable after Job creation. |
+| Idempotency key | Job | Generated by the application workflow when not supplied by the user; never derived from payload. |
+| Remote request ID and remote responses | External service, stored locally as evidence | Optional, potentially duplicated, and never authoritative local identity. |
+| Simulator processing state | Simulated external service | Accessible only through submission and reconciliation operations. |
+| Batch data | Undecided | Candidate domain concept; persistence and cardinality require later approval. |
+
+## Runtime and Deployment Model
+
+The system has two local runtime units:
+
+1. The local application runs on demand through its CLI adapter, performs a requested workflow, persists state, emits its result, and exits. Reliability cannot depend on the process remaining alive.
+2. The simulated external service runs as a separate HTTP process and retains enough simulated remote state to support idempotent submission and reconciliation by idempotency key.
+
+The repository must remain runnable without external infrastructure. Hosting, process supervision, local storage technology, and packaging are not selected by this overview.
+
+## Security and Privacy Boundary
+
+The current product targets a trusted local development or evaluation environment; authentication and authorization are outside scope.
+
+Job payloads may contain sensitive user data. Full payloads do not cross into operational logs by default, SubmissionAttempt records do not duplicate raw payloads, and stored error or response information must not expose secrets. The simulator receives Job Entry data only through its HTTP submission boundary and must not gain access to local persistence.
+
+## Architectural Constraints
+
+* Preserve the separation between CLI presentation and application/domain behavior.
+* Do not bypass the Job submission workflow from batch orchestration.
+* Do not let persistence or HTTP adapters introduce independent lifecycle transitions.
+* Do not share storage between the application and simulator.
+* Do not use remote request IDs as local identities or uniqueness keys.
+* Do not send an external request before the required durable Job and SubmissionAttempt state exists.
+* Do not automatically retry `AMBIGUOUS` Jobs or treat reconciliation as an implicit retry.
+* Do not claim exactly-once remote processing; unreliable idempotency and reconciliation reduce duplicate risk but do not eliminate uncertainty.
+* Keep persistence technology, physical schemas, package layout, CLI surface, and retry formulas outside this overview until approved separately.
+
+## Known Risks and Trade-offs
+
+* A short-lived CLI must recover from durable evidence rather than in-memory coordination.
+* The external service may process a request without returning a usable response, so some outcomes remain ambiguous even with idempotency and reconciliation capabilities.
+* Unreliable reconciliation may preserve ambiguity instead of resolving it.
+* Local-only persistence avoids external infrastructure but does not provide distributed coordination or high availability.
+* Keeping Batch as a candidate concept avoids premature persistence commitments but defers parts of batch recovery and reporting design.
+* Deterministic simulator scenarios improve repeatability but cannot reproduce every failure mode of a real external service.
+
+## Deferred Architecture Decisions
+
+The following questions require ADRs before affected features are implemented:
+
+* Which local persistence technology is used, and how does it implement the durable consistency boundary between Job state, SubmissionAttempt state, and possible external effects?
+* How is Job Entry equivalence defined, canonicalized, versioned, and represented for idempotency-key conflict detection?
+* What recovery algorithm evaluates Jobs and attempts left in progress after interruption?
+* What timeout, retry-budget, rate-limit, and retry-exhaustion policies govern external operations?
+* What HTTP contracts and evidence semantics govern submission and reconciliation with the simulator?
+* Is Batch persisted, and if so, what are its identity, membership, cardinality, lifecycle, and aggregate-state semantics?
+* What bounded concurrency model should Batch processing use, and how does it interact with persistence consistency and rate-limit coordination?
+* What retention and deletion rules apply to authoritative local history and simulator state?
+
+Exact CLI commands, input methods, response schemas, Batch ordering and duplicate presentation, and explicit user operations from `AMBIGUOUS` belong to approved feature specifications rather than this overview.
+
+## Related Architecture Decisions
+
+No ADRs have been accepted yet.
