@@ -118,7 +118,7 @@ stateDiagram-v2
 
 `AMBIGUOUS` is terminal for automatic processing.
 
-While a Job is `SUBMITTING`, no additional concurrent attempt may begin. A `PERMANENT_FAILURE` SubmissionAttempt transitions its Job to `FAILED_PERMANENT`. A `RETRYABLE_FAILURE` transitions the Job to `RETRY_SCHEDULED` only while the bounded retry policy permits another attempt; when the retry budget is exhausted, the Job transitions to `FAILED_PERMANENT`. The exact exhaustion policy is defined by the retry ADR and approved feature specification.
+While a Job is `SUBMITTING`, no additional concurrent attempt may begin. A `PERMANENT_FAILURE` SubmissionAttempt transitions its Job to `FAILED_PERMANENT`. A `RETRYABLE_FAILURE` transitions the Job to `RETRY_SCHEDULED` only while the three-SubmissionAttempt lifetime budget from ADR-006 permits another attempt; when the budget is exhausted, the Job transitions to `FAILED_PERMANENT`.
 
 A future approved feature specification may define explicit reconciliation, manual resolution, or user-approved retry transitions from `AMBIGUOUS`. No such transition may occur implicitly.
 
@@ -155,7 +155,7 @@ Persistence mechanisms may store and retrieve Jobs but must not introduce indepe
 * A request matching an existing completed Job must return that Job without creating another SubmissionAttempt or initiating another external request.
 * A Job may have at most one `STARTED` SubmissionAttempt at a time.
 * Before an external request begins, durable state must identify the Job and corresponding SubmissionAttempt and prevent recovery from treating a potentially sent request as unsent.
-* A Job in `RETRY_SCHEDULED` must preserve the earliest time at which another automatic attempt becomes eligible. Its representation and scheduling rules are defined by the retry ADR and approved feature specification.
+* A Job in `RETRY_SCHEDULED` derives its authoritative earliest eligibility from its most recent `RETRYABLE_FAILURE` SubmissionAttempt as `completed_at + retry_after_ms`.
 * `SUCCEEDED` and `FAILED_PERMANENT` must not transition automatically to another state.
 * `AMBIGUOUS` must not be retried automatically.
 * Duplicate remote request IDs must not merge, overwrite, or re-identify Jobs.
@@ -219,7 +219,7 @@ Multiple attempts may belong to the same logical submission. An attempt records 
 | `http_status`       | `integer`  |       No | HTTP response status received from the external service.     | Present only when an HTTP response was received. |
 | `remote_request_id` | `string`   |       No | Request identifier returned by the external service.         | Not required to be unique.                       |
 | `error_category`    | `string`   |       No | Stable machine-readable classification of a failure.         | Must not contain raw secrets or payload data.    |
-| `retry_after_ms`    | `integer`  |       No | Delay requested by the service or derived from retry policy. | Must be non-negative.                            |
+| `retry_after_ms`    | `integer`  |       No | Effective interval from attempt completion to retry eligibility. | Required when `RETRYABLE_FAILURE` transitions the Job to `RETRY_SCHEDULED`; non-negative. |
 
 ### Identity
 
@@ -276,7 +276,9 @@ Before an external request begins, durable state must identify the Job and corre
 * `started_at` must not change.
 * `completed_at` must not precede `started_at`.
 * `completed_at` is required once the attempt leaves `STARTED`.
-* `retry_after_ms` must not be negative.
+* `retry_after_ms` is required and non-negative when a `RETRYABLE_FAILURE` transitions its Job to `RETRY_SCHEDULED`.
+* For that transition, authoritative Job retry eligibility is `completed_at + retry_after_ms`; a duplicate authoritative Job-level eligibility field must not be introduced without an approved core-entity change.
+* A budget-exhausting `RETRYABLE_FAILURE` may retain `retry_after_ms` as diagnostic evidence but creates no retry eligibility.
 * `remote_request_id` must not have a uniqueness constraint.
 * An attempt outcome must accurately represent observed evidence.
 * A disconnect or timeout after the request may have reached the service must not be classified as a definitive remote failure without additional evidence.

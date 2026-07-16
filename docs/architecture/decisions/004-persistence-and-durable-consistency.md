@@ -56,10 +56,11 @@ Before an external submission attempt, one `BEGIN IMMEDIATE` transaction must:
 2. validate RFC 8785 Job Entry equivalence for an existing key;
 3. return an existing completed result or reject non-equivalent reuse without creating an attempt;
 4. verify that the Job is currently eligible for a new attempt;
-5. allocate the next unique attempt identity and attempt number;
-6. insert the `SubmissionAttempt` in `STARTED`;
-7. transition the Job to `SUBMITTING`;
-8. commit successfully.
+5. verify that the effective authorization time from ADR-006—`max(Job retry eligibility, service not_before gate)`, omitting Job eligibility for a first attempt—has arrived;
+6. allocate the next unique attempt identity and attempt number;
+7. insert the `SubmissionAttempt` in `STARTED`;
+8. transition the Job to `SUBMITTING`;
+9. commit successfully.
 
 The external request may begin only after that commit returns successfully. A rollback, busy-timeout exhaustion, disk error, constraint failure, or uncertain commit result must stop the workflow before external submission.
 
@@ -124,7 +125,7 @@ The recovery rules are:
 * authoritative key-conflict evidence may finalize it as a permanent failure through an approved recovery workflow;
 * `404 not_found`, timeout, disconnect, `5xx`, rate limiting, missing evidence, or failed reconciliation cannot exclude prior processing and therefore preserve an ambiguous outcome.
 
-The feature specification defines when reconciliation is attempted and how recovery results are presented, but it may not weaken these evidence rules.
+ADR-006 defines automatic reconciliation after uncertain submission and interrupted-attempt recovery. Feature specifications define concrete adapter mappings, explicit user-invoked reconciliation, and result presentation, but may not weaken these evidence rules.
 
 ### Schema evolution
 
@@ -169,7 +170,7 @@ Trade-offs:
 
 This decision does not add or change a core entity, required field, lifecycle state, relationship, ownership rule, or compatibility rule.
 
-Invocation leases and fencing generations are persistence-internal coordination records. They do not identify a Job or SubmissionAttempt, do not change domain ownership, and must not be exposed as authoritative product state.
+Invocation leases, fencing generations, and the ADR-006 service-wide rate-limit gate are persistence-internal coordination records. They do not identify a Job or SubmissionAttempt, do not change domain ownership, and must not be exposed as authoritative product state.
 
 It defines the persistence mechanism that enforces existing contracts:
 
@@ -216,6 +217,7 @@ This decision applies to:
 * SQLite connection, journal, durability, and transaction policy;
 * local multi-process writer coordination;
 * active invocation leases and fencing during external side-effect windows;
+* durable retry authorization and service-wide rate-limit coordination from ADR-006;
 * durable boundaries before and after an external submission;
 * crash-recovery evidence classification;
 * schema versioning and migration coordination;
@@ -227,8 +229,8 @@ This decision does not select or define:
 * the user-facing database path or configuration option;
 * exact busy-timeout duration or contention output contract;
 * exact lease duration, renewal cadence, fencing schema, time-source/boot-identity mechanism, or late-observation presentation;
-* retry counts, backoff, rate-limit, or timeout formulas;
-* when reconciliation is automatically or manually invoked;
+* physical representation of ADR-006 retry eligibility or service-wide rate-limit metadata;
+* concrete external-client error mappings or reconciliation presentation;
 * retention duration, archival, backup command, or deletion policy;
 * simulator persistence, which remains separate from application state.
 
@@ -251,6 +253,7 @@ If this ADR is accepted:
 * `docs/architecture/decisions/001-python-runtime-packaging-and-development-tooling.md`
 * `docs/architecture/decisions/002-execution-model-and-application-boundaries.md`
 * `docs/architecture/decisions/003-simulated-external-service-contract.md`
+* `docs/architecture/decisions/006-retry-rate-limits-ambiguity-and-recovery.md`
 
 External technical references:
 
