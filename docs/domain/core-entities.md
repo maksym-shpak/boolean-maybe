@@ -79,7 +79,7 @@ A Job is identified by `job_id`.
 
 `job_id` is generated locally and never changes.
 
-`idempotency_key` is an additional unique logical identity used for duplicate prevention. The CLI generates a key when the user does not provide one, and a user-provided key is preserved. The key must never be derived from the Job Entry payload. Reusing an `idempotency_key` for a non-equivalent Job Entry must be rejected before an external request begins.
+`idempotency_key` is an additional unique logical identity used for duplicate prevention. The application workflow generates a key when the user does not provide one, and a user-provided key is preserved. The key must never be derived from the Job Entry payload. Reusing an `idempotency_key` for a non-equivalent Job Entry must be rejected before an external request begins.
 
 Two Job Entries are equivalent when their complete JSON objects produce identical UTF-8 canonical bytes under RFC 8785, including its I-JSON constraints and verified errata. Object member order and insignificant serialization whitespace do not affect equivalence; array order and distinctions preserved by RFC 8785 do. Input that cannot be represented canonically must be rejected before external processing.
 

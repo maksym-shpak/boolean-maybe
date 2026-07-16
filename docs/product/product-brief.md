@@ -169,9 +169,9 @@ The product is successful when:
 
 ## Approved Product Decisions
 
-* The CLI generates an idempotency key by default and also accepts a user-provided key. An idempotency key must never be derived from the Job Entry payload.
+* The application workflow generates an idempotency key by default, while the CLI also accepts a user-provided key. An idempotency key must never be derived from the Job Entry payload.
 * The simulated external service supports idempotent submission and reconciliation by idempotency key. Both endpoints remain operationally unreliable so that requests may still produce retryable or ambiguous client-observed outcomes.
-* When a request matches an already completed Job, the CLI returns the stored result with `outcome` set to `already_completed`, `submitted` set to `false`, and exit code `0`. In this result, `submitted=false` means the current CLI invocation did not send another external request.
+* When a request matches an existing `SUCCEEDED` Job by idempotency key and equivalent Job Entry, the CLI returns the stored result with `outcome` set to `already_completed`, `submitted` set to `false`, and exit code `0`. In this result, `submitted=false` means the current CLI invocation did not send another external request.
 
 ## Open Product Questions
 
