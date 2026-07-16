@@ -24,6 +24,7 @@ The local application owns Job identity and execution state. The simulator repre
 | User interface | Command-line application | Exact commands and input/output schemas |
 | External integration | HTTP | Client library and wire schemas |
 | Persistence | Local durable storage | Storage technology, physical schema, and consistency mechanism |
+| Execution model | Synchronous CLI adapter enters one asynchronous application workflow per invocation; domain rules remain synchronous; Batch uses bounded structured concurrency (see ADR-002) | Exact Batch concurrency limit and adapter-specific non-blocking mechanisms |
 | Runtime | On-demand local application process with a CLI adapter, plus a separate simulator process; the CLI is installed as the `boolean-maybe` console entry point (see ADR-001) | Simulator process launch and packaging details |
 
 ## Architectural Principles
@@ -31,19 +32,25 @@ The local application owns Job identity and execution state. The simulator repre
 1. **Application logic is independent of the CLI.**
    The CLI translates user input into workflow requests and renders results; it does not own submission, retry, reconciliation, or lifecycle rules.
 
-2. **Local state is authoritative.**
+2. **Execution boundaries are explicit.**
+   The synchronous CLI adapter enters the asynchronous application once per invocation. Application workflows own I/O orchestration, while domain rules remain synchronous and independent of CLI and async infrastructure.
+
+3. **Local state is authoritative.**
    The local application owns Job and SubmissionAttempt identity and lifecycle state. Remote responses are evidence, not replacements for local identity.
 
-3. **Durable intent precedes possible external effects.**
+4. **Durable intent precedes possible external effects.**
    Before an external request begins, durable state identifies the Job and corresponding SubmissionAttempt and prevents recovery from treating a potentially sent request as unsent.
 
-4. **Uncertainty remains explicit.**
+5. **Uncertainty remains explicit.**
    Missing or inconclusive remote evidence produces an ambiguous outcome rather than invented success or failure. `AMBIGUOUS` is never retried automatically.
 
-5. **All submission paths use one reliability model.**
+6. **All submission paths use one reliability model.**
    Single-entry, batch, retry, and reconciliation flows preserve the same Job and SubmissionAttempt invariants.
 
-6. **The simulator remains isolated and deterministic.**
+7. **Batch concurrency is bounded and structured.**
+   Concurrent Job workflows are limited explicitly, every task is awaited within the invocation, and expected per-Job outcomes remain isolated from sibling Jobs.
+
+8. **The simulator remains isolated and deterministic.**
    It runs separately, owns only simulated remote behavior, and reproduces configured failure scenarios without sharing application state.
 
 ## System Context
@@ -91,10 +98,10 @@ Arrows represent allowed runtime dependencies or calls. Application workflows de
 
 | Component | Responsibilities | Must not own |
 | --- | --- | --- |
-| CLI adapter | Parse inputs, invoke an application workflow, render machine-readable results and documented exit codes. | Job lifecycle rules, retry decisions, persistence operations, or HTTP reliability behavior. |
-| Application workflows | Coordinate use cases and enforce domain contracts across persistence and external interactions. | Transport-specific presentation or physical storage details. |
+| CLI adapter | Parse inputs, synchronously enter one top-level asynchronous application workflow, and render machine-readable results and documented exit codes. | Event-loop orchestration beyond the single application entry, Job lifecycle rules, retry decisions, persistence operations, or HTTP reliability behavior. |
+| Application workflows | Asynchronously coordinate use cases and enforce domain contracts across persistence and external interactions. | Transport-specific presentation, physical storage details, or independent domain state. |
 | Job submission workflow | Resolve idempotency identity, detect existing Jobs, create and complete SubmissionAttempts, classify observed outcomes, and apply bounded retry semantics. | CLI formatting, batch-specific state, or simulator scenario control. |
-| Batch workflow | Accept multiple Job Entries, coordinate the single-Job submission workflow, preserve Job isolation, and produce aggregate reporting. | A separate submission/retry model or authority over Job state. |
+| Batch workflow | Accept multiple Job Entries, coordinate bounded structured execution of the single-Job submission workflow, preserve Job isolation, and produce aggregate reporting. | Unbounded or fire-and-forget tasks, a separate submission/retry model, or authority over Job state. |
 | Reconciliation workflow | Query external evidence by idempotency key and apply only explicit, auditable resolutions allowed by an approved specification. | Implicit retries from `AMBIGUOUS` or unverified reclassification. |
 | Persistence boundary | Durably store and retrieve authoritative local state while preserving required identity, lifecycle, and consistency guarantees. | Independent domain transitions or external HTTP behavior. |
 | External service client | Translate workflow requests and remote observations across the HTTP boundary without assigning stronger certainty than the evidence supports. | Local identity, Job lifecycle decisions, or retry policy ownership. |
@@ -105,6 +112,8 @@ Arrows represent allowed runtime dependencies or calls. Application workflows de
 The CLI depends on application workflows. It may not call persistence or the simulator directly.
 
 Application workflows depend on the stable domain contracts and on abstract persistence and external-service boundaries. Concrete storage and HTTP details remain outside workflow logic.
+
+The CLI creates one event-loop lifecycle per invocation and crosses into the asynchronous application exactly once. Domain rules remain synchronous; potentially long infrastructure I/O must not block the application event loop.
 
 The Batch workflow delegates each eligible Job to the Job submission workflow. Reconciliation is a separate explicit workflow and cannot silently become a retry path.
 
@@ -169,10 +178,10 @@ A later CLI invocation triggers an application workflow that reads authoritative
 
 The system has two local runtime units:
 
-1. The local application runs on demand through its CLI adapter, performs a requested workflow, persists state, emits its result, and exits. Reliability cannot depend on the process remaining alive.
+1. The local application runs on demand through its synchronous CLI adapter. Each invocation creates one event-loop lifecycle, awaits one top-level asynchronous application workflow, emits its result, and exits. No application task may outlive the invocation, and reliability cannot depend on the process remaining alive.
 2. The simulated external service runs as a separate HTTP process and retains enough simulated remote state to support idempotent submission and reconciliation by idempotency key.
 
-The repository must remain runnable without external infrastructure. Hosting, process supervision, local storage technology, and packaging are not selected by this overview.
+The repository must remain runnable without external infrastructure. Hosting, process supervision, local storage technology, and simulator process packaging are not selected by this overview.
 
 ## Security and Privacy Boundary
 
@@ -183,7 +192,11 @@ Job payloads may contain sensitive user data. Full payloads do not cross into op
 ## Architectural Constraints
 
 * Preserve the separation between CLI presentation and application/domain behavior.
+* Enter the asynchronous application exactly once from the synchronous CLI adapter; do not leak CLI-framework or event-loop concerns into domain interfaces.
 * Do not bypass the Job submission workflow from batch orchestration.
+* Do not create unbounded or fire-and-forget Batch tasks; await all owned tasks before the invocation exits.
+* Preserve expected per-Job failure and ambiguity as isolated results rather than allowing them to cancel sibling Jobs.
+* Propagate unexpected cancellation after required cleanup and durable-state handling; do not silently swallow cancellation.
 * Do not let persistence or HTTP adapters introduce independent lifecycle transitions.
 * Do not share storage between the application and simulator.
 * Do not use remote request IDs as local identities or uniqueness keys.
@@ -211,11 +224,11 @@ The following questions require ADRs before affected features are implemented:
 * What timeout, retry-budget, rate-limit, and retry-exhaustion policies govern external operations?
 * What HTTP contracts and evidence semantics govern submission and reconciliation with the simulator?
 * Is Batch persisted, and if so, what are its identity, membership, cardinality, lifecycle, and aggregate-state semantics?
-* What bounded concurrency model should Batch processing use, and how does it interact with persistence consistency and rate-limit coordination?
 * What retention and deletion rules apply to authoritative local history and simulator state?
 
-Exact CLI commands, input methods, response schemas, Batch ordering and duplicate presentation, and explicit user operations from `AMBIGUOUS` belong to approved feature specifications rather than this overview.
+Exact CLI commands, input methods, response schemas, the positive Batch concurrency limit and its user-facing configurability, Batch ordering and duplicate presentation, and explicit user operations from `AMBIGUOUS` belong to approved feature specifications rather than this overview.
 
 ## Related Architecture Decisions
 
 * `docs/architecture/decisions/001-python-runtime-packaging-and-development-tooling.md` — Python runtime, packaging, and development tooling baseline.
+* `docs/architecture/decisions/002-execution-model-and-application-boundaries.md` — synchronous CLI boundary, asynchronous application workflows, and bounded structured Batch concurrency.
