@@ -23,7 +23,7 @@ The local application owns Job identity and execution state. The simulator repre
 | Language | Python 3.12 (CPython, `>=3.12,<3.13`); packaged with `uv` and Hatchling under a `src/boolean_maybe/` layout; formatting/linting via Ruff, static typing via Pyright, tests via pytest (see ADR-001) | Feature-level supporting libraries |
 | User interface | Command-line application | Exact commands and input/output schemas |
 | External integration | HTTP submission and reconciliation by idempotency key; RFC 8785 payload equivalence and evidence semantics defined by ADR-003 | Client library and feature-level wire-schema details beyond required evidence |
-| Persistence | Local durable storage | Storage technology, physical schema, and consistency mechanism |
+| Persistence | One local SQLite database through the standard-library `sqlite3` adapter; rollback-journal mode, full synchronous durability, explicit short transactions, and multi-process leases/fencing define the consistency boundary (see ADR-004) | Physical schema, exact contention and lease parameters, time-source mechanism, and retention policy |
 | Execution model | Synchronous CLI adapter enters one asynchronous application workflow per invocation; domain rules remain synchronous; Batch uses bounded structured concurrency (see ADR-002) | Exact Batch concurrency limit and adapter-specific non-blocking mechanisms |
 | Runtime | On-demand local application process with a CLI adapter, plus a separate simulator process; the CLI is installed as the `boolean-maybe` console entry point (see ADR-001) | Simulator process launch and packaging details |
 
@@ -146,7 +146,7 @@ sequenceDiagram
   end
 ```
 
-The persistence consistency mechanism is deliberately unspecified. Its observable guarantee is that recovery cannot mistake a potentially sent request for one that was never sent.
+Persistence uses separate short transactions before and after the HTTP side effect and never holds a transaction open across network I/O. Before submission, it commits the Job, a `STARTED` SubmissionAttempt, `SUBMITTING` state, and current invocation ownership; after an observation, the current lease and fencing owner atomically records the attempt outcome and Job transition. A committed pre-side-effect transaction authorizes the request but does not prove that it began or was processed.
 
 This sequence is a simplified happy-path boundary view. It does not enumerate every state-dependent outcome, including an existing `SUBMITTING` or `AMBIGUOUS` Job or a `RETRY_SCHEDULED` Job that has not reached its eligibility time.
 
@@ -168,7 +168,7 @@ Failure scenarios are selected by a simulator-owned deterministic plan using ope
 
 ### Recovery After Interruption
 
-A later CLI invocation triggers an application workflow that reads authoritative local state through the persistence boundary. A Job left in `SUBMITTING` cannot become eligible for another external request unless evidence and an approved recovery policy safely exclude prior remote processing. The concrete recovery algorithm is deferred to an ADR and feature specification.
+A later CLI invocation triggers an application workflow that reads authoritative local state through the persistence boundary. An unexpired invocation lease identifies active ownership; after expiry, a recovery workflow may claim the attempt only by atomically advancing its fencing generation. Takeover never proves that the prior request was unsent, so recovery preserves ambiguity unless authoritative evidence from ADR-003 supports resolution. Exact recovery operations, lease timing, and late-evidence handling belong to approved feature specifications.
 
 ## Data and State Ownership
 
@@ -206,6 +206,8 @@ Job payloads may contain sensitive user data. Full payloads do not cross into op
 * Preserve expected per-Job failure and ambiguity as isolated results rather than allowing them to cancel sibling Jobs.
 * Propagate unexpected cancellation after required cleanup and durable-state handling; do not silently swallow cancellation.
 * Do not let persistence or HTTP adapters introduce independent lifecycle transitions.
+* Use the single local SQLite database and transaction policy defined by ADR-004; do not hold a database transaction open across HTTP, retry delay, or user input.
+* Require current lease ownership and fencing generation before initiating a request or finalizing its normal post-side-effect transaction.
 * Do not share storage between the application and simulator.
 * Do not use remote request IDs as local identities or uniqueness keys.
 * Do not infer safe retry from reconciliation `404`, a remote request ID, or other non-authoritative evidence.
@@ -213,7 +215,7 @@ Job payloads may contain sensitive user data. Full payloads do not cross into op
 * Do not send an external request before the required durable Job and SubmissionAttempt state exists.
 * Do not automatically retry `AMBIGUOUS` Jobs or treat reconciliation as an implicit retry.
 * Do not claim exactly-once remote processing; unreliable idempotency and reconciliation reduce duplicate risk but do not eliminate uncertainty.
-* Keep persistence technology, physical schemas, package layout, CLI surface, and retry formulas outside this overview until approved separately.
+* Keep physical schemas, package layout, CLI surface, retry formulas, exact lease parameters, and retention policy outside this overview until approved separately.
 
 ## Known Risks and Trade-offs
 
@@ -228,16 +230,15 @@ Job payloads may contain sensitive user data. Full payloads do not cross into op
 
 The following questions require ADRs before affected features are implemented:
 
-* Which local persistence technology is used, and how does it implement the durable consistency boundary between Job state, SubmissionAttempt state, and possible external effects?
-* What recovery algorithm evaluates Jobs and attempts left in progress after interruption?
 * What timeout, retry-budget, rate-limit, and retry-exhaustion policies govern external operations?
 * Is Batch persisted, and if so, what are its identity, membership, cardinality, lifecycle, and aggregate-state semantics?
 * What retention and deletion rules apply to authoritative local history and simulator state?
 
-Exact CLI commands, input methods, response schemas, the positive Batch concurrency limit and its user-facing configurability, Batch ordering and duplicate presentation, and explicit user operations from `AMBIGUOUS` belong to approved feature specifications rather than this overview.
+Exact CLI commands, input methods, response schemas, the positive Batch concurrency limit and its user-facing configurability, Batch ordering and duplicate presentation, persistence schemas and coordination parameters, recovery operations, and explicit user operations from `AMBIGUOUS` belong to approved feature specifications rather than this overview.
 
 ## Related Architecture Decisions
 
 * `docs/architecture/decisions/001-python-runtime-packaging-and-development-tooling.md` — Python runtime, packaging, and development tooling baseline.
 * `docs/architecture/decisions/002-execution-model-and-application-boundaries.md` — synchronous CLI boundary, asynchronous application workflows, and bounded structured Batch concurrency.
 * `docs/architecture/decisions/003-simulated-external-service-contract.md` — simulator endpoints, idempotency and payload-equivalence rules, reconciliation evidence, and deterministic failure scenarios.
+* `docs/architecture/decisions/004-persistence-and-durable-consistency.md` — SQLite persistence, durable side-effect boundaries, multi-process fencing, crash evidence, and migration policy.
