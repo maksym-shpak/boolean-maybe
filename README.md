@@ -1,157 +1,231 @@
 # boolean-maybe
 
-A resilient command-line application for submitting and managing jobs through a deliberately unreliable external API.
+*A resilient CLI for a deliberately unreliable job submission API.*
 
-This repository currently provides:
+External APIs fail in a particularly awkward way: sometimes the server processes a request but the response never reaches the caller. A blind retry may create duplicate work, while treating every disconnect as failure may hide work that actually succeeded.
 
-* `boolean-maybe submit`, the first end-to-end single-Job submission command, described below;
-* `boolean-maybe-simulator`, a small local HTTP simulator of that unreliable external service, described below.
+`boolean-maybe` explores how a local command-line client can stay honest under that uncertainty. It records durable intent before HTTP, keeps the same Idempotency Key across retries, reconciles uncertain submissions with the remote service, and reports `AMBIGUOUS` when the available evidence cannot support a stronger answer.
 
-See `docs/product/product-brief.md`, `docs/product/glossary.md`, `docs/domain/core-entities.md`, and `docs/architecture/` for product, domain, and architecture context.
+A Remote Request ID is useful evidence, but it is not the identity of a local Job and is not assumed to be unique. The authoritative local identity is the Job; each SubmissionAttempt preserves what was observed during one submission attempt.
 
-## Prerequisites
+The repository is a guided journey from product intent through domain and architecture decisions to executable code and tests. Its implemented command handles one logical Job at a time. Batch orchestration and production-service concerns remain outside the current boundary.
 
-* Python 3.12
-* [`uv`](https://docs.astral.sh/uv/)
+## How to read this repository
 
-## Setup
+1. The [product brief](docs/product/product-brief.md) defines the user problem, product principles, and deliberate limits.
+2. The [glossary](docs/product/glossary.md) gives uncertainty, attempts, retries, and remote evidence stable names.
+3. [Core entities](docs/domain/core-entities.md) turn that language into identity, lifecycle, and compatibility contracts.
+4. The [architecture overview](docs/architecture/architecture-overview.md) maps those contracts to the CLI, application workflow, SQLite persistence, HTTP adapter, and simulator.
+5. The six [architecture decisions](docs/architecture/decisions/) preserve the non-obvious choices, alternatives, consequences, and system boundaries behind that map.
+6. The [feature specifications](docs/specs/features/) divide the design into reviewable vertical slices with observable acceptance criteria.
+7. The implementation under [`src/boolean_maybe`](src/boolean_maybe) and executable evidence under [`tests`](tests) show which contracts are present now.
+
+## From product intent to architecture
+
+The central design rule is simple: local state must say what the client is authorized to do before the client can produce an external side effect. A short SQLite transaction creates or resolves the Job, records a started attempt, and commits ownership metadata before the HTTP request begins. A second short transaction records authoritative success or classified failure; no database transaction remains open across network I/O.
+
+```mermaid
+flowchart LR
+    User[User or automation] --> CLI[boolean-maybe CLI]
+    CLI --> Workflow[Submission workflow]
+    Workflow -->|durable state before and after HTTP| SQLite[(Local SQLite database)]
+    Workflow -->|POST submission or GET reconciliation| Client[External-service client]
+    Client --> Simulator[Simulated External Service]
+```
+
+The Job owns the local identity, canonical payload, Idempotency Key, and lifecycle state. A SubmissionAttempt is durable evidence about a particular attempt; it does not replace the Job. When dispatch may have happened but the result is unknown, the workflow asks the service about the same Idempotency Key instead of blindly posting again. If submission and reconciliation remain inconclusive, the Job becomes `AMBIGUOUS`, a terminal automatic state that preserves uncertainty rather than inventing success or failure.
+
+## Decisions and trade-offs
+
+- **Runtime and tooling — [ADR-001](docs/architecture/decisions/001-python-runtime-packaging-and-development-tooling.md).** Python 3.12, `uv`, a `src` layout, and a small runtime dependency set keep setup reproducible. The standard library supplies SQLite and HTTP; RFC 8785 canonicalization is the deliberate direct dependency.
+
+- **Application boundaries — [ADR-002](docs/architecture/decisions/002-execution-model-and-application-boundaries.md).** A synchronous CLI invokes one asynchronous application workflow. Blocking SQLite and HTTP work is isolated from the event loop, while domain and persistence rules remain outside argument parsing and rendering.
+
+- **A real local failure surface — [ADR-003](docs/architecture/decisions/003-simulated-external-service-contract.md).** The simulator is a separate loopback HTTP process with deterministic scenarios. This costs more than a mock, but exercises response loss, disconnects, status codes, and reconciliation through real sockets.
+
+- **Durability before side effects — [ADR-004](docs/architecture/decisions/004-persistence-and-durable-consistency.md).** SQLite uses explicit short transactions, schema migrations, ownership leases, and fencing. The trade-off is more coordination metadata and conservative recovery in exchange for evidence that survives process termination.
+
+- **Identity and duplicate prevention — [ADR-005](docs/architecture/decisions/005-identity-and-duplicate-prevention.md).** The Job ID, Idempotency Key, and Remote Request ID have separate roles. Equivalent payloads use RFC 8785 canonical bytes; a completed matching Job replays stored evidence without HTTP.
+
+- **Bounded reliability — [ADR-006](docs/architecture/decisions/006-retry-rate-limits-ambiguity-and-recovery.md).** Retries, jitter, `Retry-After`, a shared rate-limit gate, reconciliation, and recovery all have finite budgets. The client prefers a truthful terminal ambiguity over unbounded waiting or an unsafe duplicate.
+
+## Implementation slices
+
+### 1. Simulated External Service
+
+The simulator implements `POST /jobs` and `GET /jobs/by-idempotency-key/{key}`, canonical payload equivalence, idempotent replay, conflict detection, deterministic failure plans, and redacted JSON Lines operational logs. A separate real HTTP boundary catches socket and response-delivery behavior that an in-process mock would hide. Its small preset set covers `500`, `429`, timeouts, processed-without-response cases, disconnects, duplicate Remote Request IDs, and unreliable reconciliation. It is local test infrastructure, not a production API or durable remote store. See [Simulated External Service](docs/specs/features/simulated-external-service.md).
+
+### 2. Durable single-Job happy path
+
+The `submit` command validates one inline JSON object, resolves an Idempotency Key, initializes SQLite, records `SUBMITTING`/`STARTED` before HTTP, validates authoritative success evidence, and atomically reaches `SUCCEEDED`. Reusing a matching completed key returns the stored result without another request. See [Submit a Single Job](docs/specs/features/submit-single-job.md).
+
+### 3. Reliability hardening
+
+The current code hardens that same workflow rather than introducing a second path. It adds error classification, bounded submission and reconciliation budgets, jittered waits, `Retry-After`, a durable service-wide gate, restart takeover with fencing, late-observation storage, structured attempt history, and explicit operational outcomes. The target contract is complete in [Reliable Job Submission](docs/specs/features/reliable-job-submission.md), but the implementation is still partially hardened; the status table below distinguishes implemented paths from known remaining gaps.
+
+## Current implementation status
+
+| Capability | Status | What is available now |
+| --- | --- | --- |
+| Packaging and CLI bootstrap | Implemented | Python 3.12 package with `boolean-maybe` and `boolean-maybe-simulator` entry points. |
+| Deterministic loopback simulator | Implemented | Submission, reconciliation, idempotent replay, conflicts, ten failure presets, and redacted JSONL logs. |
+| Durable single-Job happy path | Implemented | Validation, migration v1, pre/post HTTP transactions, success, and stored replay. |
+| Core retry and reconciliation flow | Partially implemented | Main `429`, proven-not-sent, uncertain-dispatch, bounded reconciliation, and ambiguity paths exist; edge-condition hardening remains. |
+| Restart recovery and fencing | Partially implemented | Expired-lease takeover and late evidence exist, with remaining cancellation, timing, and evidence-consumption gaps. |
+| Complete structured observation ledger | Specified | The reliability contract defines it; not every submission/reconciliation observation is yet durably and atomically represented. |
+| Machine-readable command results | Implemented | Compact JSON on stdout, stable exit-code classes, attempt history, and per-invocation reconciliation count. |
+| CLI structured operational logging | Deferred | The simulator logs structured events; the client CLI currently exposes result JSON and concise diagnostics, not a separate operational log stream. |
+| Batch submission and bounded Batch concurrency | Deferred | The current command accepts one logical Job only. |
+| Manual resolution, inspection, retention, and backup tools | Deferred | No administrative CLI is provided yet. |
+
+## Running the project
+
+### Prerequisites and setup
+
+- Python 3.12
+- [`uv`](https://docs.astral.sh/uv/)
 
 ```sh
 uv sync --locked
 ```
 
-This installs both console entry points, `boolean-maybe` and `boolean-maybe-simulator`, into the project's managed virtual environment using the committed lockfile.
-
-## Submitting a Job (`boolean-maybe submit`)
-
-`submit` proves the product's foundational path for one Job Entry: validate, durably record the Job and a `STARTED` attempt *before* any HTTP request, submit once to the Simulated External Service, atomically record success, and print a stable JSON result. A later invocation with the same key and an equivalent Job Entry replays the persisted successful result without another attempt or HTTP request. This first feature intentionally does not implement retry, reconciliation, or recovery of an interrupted submission; see `docs/specs/features/submit-single-job.md` for the complete contract.
-
-Command syntax:
-
-```text
-boolean-maybe submit --job-entry JSON [--idempotency-key KEY] [--database PATH] [--service-url URL]
-```
-
-* `--job-entry` is one inline UTF-8 JSON object (any canonicalizable object, including `{}`); it is rejected before any database is opened or HTTP request is sent if it is not valid, canonicalizable, RFC 8785/I-JSON-compliant input up to 1 MiB.
-* `--idempotency-key` is optional: 1-128 characters from `A-Z a-z 0-9 . _ ~ -`. When omitted, a `job_<32 lowercase hex>` key is generated (never derived from the Job Entry).
-* `--database` defaults to `.boolean-maybe/boolean-maybe.sqlite3` relative to the current directory. A missing parent directory is created; an existing directory or file is never replaced or deleted.
-* `--service-url` defaults to `http://127.0.0.1:8080` and accepts only an unauthenticated loopback `http` origin (no hostnames, credentials, query, fragment, or non-root path).
-
-Example, against a simulator started with `uv run --locked boolean-maybe-simulator`:
-
-```sh
-uv run --locked boolean-maybe submit --job-entry '{"work":"example"}'
-```
-
-```json
-{"outcome":"succeeded","submitted":true,"job_id":"...","idempotency_key":"job_...","state":"SUCCEEDED","attempt":{"attempt_id":"...","attempt_number":1,"http_status":201,"remote_request_id":"remote-..."},"result":{"status":"processed","payload_digest":"sha256:...","remote_request_id":"remote-..."}}
-```
-
-Repeating the same command with `--idempotency-key job-a` twice returns `outcome: "already_completed"` and `submitted: false` on the second call, without contacting the simulator again.
-
-Exit codes: `0` for `succeeded`, `already_completed`, or help; `1` when a valid command could not complete successfully (`idempotency_conflict`, `job_not_eligible`, `submission_incomplete`, or another local/operational failure); `2` when command syntax or Job Entry/Idempotency Key/database path/service URL validation fails before any product work begins.
-
-**This feature provides no application-level encryption or permission hardening.** The SQLite database may contain sensitive Job Entry payloads; protect the database file with local filesystem permissions.
-
-## Simulated External Service
-
-`boolean-maybe-simulator` is a separate HTTP process, built on the Python standard library's `http.server` rather than a web framework, that reproduces the deterministic failure scenarios described by `docs/architecture/decisions/003-simulated-external-service-contract.md` and `docs/specs/features/simulated-external-service.md`. It exists only to exercise the CLI's reliability behavior in later features; it is not a mock of the CLI, not a production API, and not an authority for local Job state.
-
-**The simulator is loopback-only, unauthenticated, intentionally unreliable, and must never be exposed beyond local development or evaluation use.** All processed-record state and per-key request ordinals are held in memory only and are discarded whenever the process restarts; a fresh process has no evidence of anything a previous process handled.
-
-### Run with default (`success`) behavior
+Start the simulator in one terminal:
 
 ```sh
 uv run --locked boolean-maybe-simulator
 ```
 
-By default this binds to `http://127.0.0.1:8080` and applies normal state-dependent behavior to every request (equivalent to the `success` preset): a new idempotency key is processed and a repeated equivalent submission is replayed.
+Submit a Job from another terminal:
 
-Command syntax:
-
-```text
-boolean-maybe-simulator [--host 127.0.0.1] [--port 8080] [--scenario-plan PATH]
+```sh
+uv run --locked boolean-maybe submit --job-entry '{"work":"example"}'
 ```
 
-* `--host` must be a loopback IP literal (`ipaddress.ip_address(value).is_loopback`), e.g. `127.0.0.1` or `::1`. Hostnames such as `localhost` are rejected.
-* `--port` is an integer from 1 to 65535 (default `8080`).
-* `--scenario-plan` is an optional path to a version-1 JSON scenario plan (below). The plan is fully validated before the socket binds; an invalid plan, host, or port exits with code `2` and starts no server.
+The command prints one compact JSON object. On success it includes the local Job ID, resolved Idempotency Key, state, current attempt, result evidence, `attempt_history`, and `reconciliation_requests`.
 
-### Endpoints
+Supply a stable key when another invocation may need to continue or recover the same Job:
 
-`POST /jobs` — submit a Job Entry:
-
-```text
-POST /jobs
-Content-Type: application/json
-Idempotency-Key: <1-128 chars from A-Z a-z 0-9 . _ ~ ->
-
-{ "...": "any RFC 8785-canonicalizable JSON object" }
+```sh
+uv run --locked boolean-maybe submit --job-entry '{"work":"example"}' --idempotency-key job-demo
 ```
 
-* A new key is processed once and returns `201` with `replayed: false`.
-* An RFC 8785-equivalent resubmission of the same key returns `200` with the stored result and `replayed: true`, without processing again.
-* The same key bound to a non-equivalent Job Entry returns `409` with both payload digests, and never mutates the existing binding.
+Run the same command again after success to receive `already_completed` from local storage without another HTTP request.
 
-`GET /jobs/by-idempotency-key/{idempotency_key}` — reconcile by the same key (percent-encoded per RFC 3986 if needed):
+### Exercise a failure scenario
 
-* Returns `200` with `status: "processed"` and the stored evidence if a record exists.
-* Returns `404` with `status: "not_found"` if it does not. This is a point-in-time observation only, not proof that no earlier process ever handled the key.
-
-Both endpoints may also return the documented validation errors (`400`, `404 route_not_found`, `405`, `413`, `415`) or one of the ten deterministic failure presets configured by a scenario plan; see the feature specification for the complete contract, error codes, and preset table.
-
-### Scenario plans
-
-Without `--scenario-plan`, every request uses normal state-dependent behavior. To exercise deterministic failures, supply a version-1 JSON plan:
+Save this as `plan.json`:
 
 ```json
 {
   "version": 1,
   "rules": [
-    { "operation": "submission", "idempotency_key": "job-a", "scenario": "429_then_success" },
-    { "operation": "reconciliation", "idempotency_key": "*", "scenario": "reconciliation_timeout" }
+    {"operation": "submission", "idempotency_key": "job-rate-limit", "scenario": "429_then_success"}
   ]
 }
 ```
 
-* `idempotency_key` is either one accepted exact key or the wildcard `*`; an exact match always takes precedence over a wildcard match for the same operation.
-* Each `scenario` is one of: `success`, `500_then_success`, `429_then_success`, `connect_timeout`, `processed_then_disconnect`, `processed_without_response`, `processed_then_500`, `duplicate_remote_request_id`, `reconciliation_timeout`, `always_500`.
-* The plan is immutable for the lifetime of the process; there is no runtime override.
-
-Run with:
+Then start the simulator and submit with the matching key:
 
 ```sh
-uv run --locked boolean-maybe-simulator --scenario-plan path/to/plan.json
+uv run --locked boolean-maybe-simulator --scenario-plan plan.json
+uv run --locked boolean-maybe submit --job-entry '{"work":"example"}' --idempotency-key job-rate-limit
 ```
 
-### Example: one submission and reconciliation with `curl`
+The default database is `.boolean-maybe/boolean-maybe.sqlite3` relative to the current directory. Use `--database PATH` to choose an explicit file and `--service-url http://127.0.0.1:PORT` for a simulator on another loopback port. The client deliberately rejects non-loopback origins.
 
-Bash / zsh:
+There is no cleanup command. For disposable development state only, stop active processes and remove the explicitly selected SQLite file manually. Do not delete a database whose Job evidence you need; the application never replaces or clears it for you.
+
+### Validate the repository
 
 ```sh
-curl -i -X POST http://127.0.0.1:8080/jobs \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: job-a' \
-  -d '{"work":"example"}'
-
-curl -i http://127.0.0.1:8080/jobs/by-idempotency-key/job-a
+uv sync --locked
+uv lock --locked
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked pyright
+uv run --locked pytest -q
+uv build
 ```
 
-PowerShell quoting differs (use double quotes for the outer string and escape inner double quotes, or use `curl.exe` with single-quoted JSON as above if available):
+## Reliability model
 
-```powershell
-curl.exe -i -X POST http://127.0.0.1:8080/jobs `
-  -H "Content-Type: application/json" `
-  -H "Idempotency-Key: job-a" `
-  -d '{\"work\":\"example\"}'
+The client first separates observations where dispatch is proven not to have started from observations where the request may have reached the service. A proven-not-sent failure can safely consume a retry attempt. A timeout, disconnect, delivered `5xx`, malformed response, or lost response is uncertain and routes to reconciliation.
 
-curl.exe -i http://127.0.0.1:8080/jobs/by-idempotency-key/job-a
-```
+Submission retries are bounded across the Job lifetime. Delays use full jitter, and a valid `Retry-After` may extend eligibility. A durable service-wide gate allows one `429` to delay other Jobs using the same database and service identity. If the required delay does not fit the invocation's wait allowance, the CLI returns a resumable outcome instead of sleeping without bound.
 
-### Stopping the simulator
+Reconciliation uses the original Idempotency Key. A matching processed result is authoritative success; a conflict is permanent failure; repeated inconclusive observations eventually produce `AMBIGUOUS`. Recovery follows the same rule: an expired owner may be fenced out and the new owner reconciles existing work rather than assuming the old POST never happened.
 
-`Ctrl+C` performs a clean shutdown: the server stops accepting connections, interrupts any in-progress timeout preset, closes active connections, waits at most two seconds for in-flight requests, and exits with code `0`. All in-memory state is discarded; the next run starts empty with ordinals reset to zero.
+## Guarantees and non-guarantees
 
-### Operational logs
+The project guarantees durable local authorization before a submission request, exact Idempotency Key reuse, canonical payload comparison, finite automatic work, no local replay HTTP call after recorded success, and explicit representation of unresolved uncertainty on the covered paths.
 
-The simulator writes one JSON object per line to stderr for `simulator_started`, `request_completed`, `request_aborted`, `configuration_rejected`, and `simulator_stopped`. Logs never contain raw idempotency keys, Job Entry payloads, canonical payload bytes, full payload digests, response bodies, or scenario-plan content; an accepted key is identified only by a 12-character `key_fingerprint`.
+It does **not** promise exactly-once execution. It cannot prove what an external process did when both submission and reconciliation evidence are lost. It does not treat Remote Request IDs as unique, does not provide application-level database encryption or permission hardening, and does not make the in-memory simulator durable across restart. Current reliability gaps listed below also mean the complete specification is not yet a blanket implementation guarantee.
+
+## Failure scenarios
+
+| Scenario | Intended client behavior |
+| --- | --- |
+| Immediate `201` or equivalent replay `200` | Record `SUCCEEDED` and return authoritative result evidence. |
+| Delivered `429` | Record retryable failure, honor bounded backoff/`Retry-After`, advance the shared gate, and retry only while eligible. |
+| Connection failure proven before dispatch | Retry with the same Job identity and key within the remaining budget. |
+| Timeout, disconnect, or delivered `5xx` | Do not blindly resubmit that attempt; reconcile by Idempotency Key. |
+| Remote processing followed by response loss | Reconciliation records the matching remote result without creating another remote Job. |
+| Submission and reconciliation both inconclusive | Transition to `AMBIGUOUS`; perform no further automatic retry. |
+| Persistent `500` during reconciliation | Stop after the reconciliation budget and report `ambiguous`; do not loop indefinitely. |
+| Duplicate Remote Request ID across Jobs | Keep the Jobs separate because the remote identifier is evidence, not identity. |
+| Same key with a different canonical payload | Return `idempotency_conflict` without sending HTTP. |
+| Matching locally completed Job | Return `already_completed` from stored evidence without sending HTTP. |
+| Another live owner holds the attempt | Return `job_in_progress`; do not steal ownership or dispatch. |
+| Required SQLite operation fails | Return `local_persistence_failure` and avoid claiming a remote outcome. |
+
+## Results, logs, and exit codes
+
+The client reserves stdout for one newline-terminated JSON result. Successful and reliability results include durable evidence where available; `submitted` describes only whether the current invocation initiated or may have initiated a submission POST. Expected errors omit payloads, raw response bodies, SQL, tracebacks, and secret-bearing headers.
+
+| Exit code | Meaning |
+| ---: | --- |
+| `0` | `succeeded`, `already_completed`, or help. |
+| `1` | A valid command ended in any other product or operational outcome. |
+| `2` | Command syntax or pre-product validation failed. |
+
+The simulator writes redacted JSON Lines events to stderr. The client CLI may write concise diagnostics to stderr, but separate structured operational logging for the client is deferred.
+
+## Testing strategy
+
+The suite works from small invariants outward: strict JSON and domain transitions; migration, schema, corruption, and transaction tests; stubbed HTTP classification; real loopback simulator integration; application workflow tests; CLI subprocess contracts; multi-process same-key races; and crash-boundary process termination. Injected clocks, random sources, sleepers, persistence faults, and HTTP adapters keep retry and timing tests deterministic without real long waits.
+
+The repository also runs Ruff, Pyright, locked dependency checks, and package builds. Some permission and locking tests are platform-specific; skips document environments where an operating system cannot reproduce the required semantics.
+
+## Current scope
+
+The usable surface is deliberately narrow: one inline canonicalizable JSON object, one local SQLite database, one loopback HTTP service, and one `submit` command. There is no authentication, TLS, remote production deployment, file/stdin input, alternative rendering, arbitrary administrative access, or Batch command. The database can contain sensitive Job Entries and must be protected with filesystem permissions.
+
+## Deferred work
+
+| Area | Why it remains deferred |
+| --- | --- |
+| Complete late-observation handling | Late `429` evidence and all reconciliation categories still need the same durable gate/budget semantics as live observations. |
+| Atomic structured evidence ledger | Observation recording and terminal transitions need stronger all-or-nothing crash behavior and stricter corruption validation. |
+| Cancellation and timing hardening | Stage-aware cancellation, intentional-wait accounting, lease-renewal cadence, and wall-clock edge cases need broader proof. |
+| Migration-chain hardening | Each historical schema version should be verified before a later migration is allowed to trust it. |
+| Batch orchestration | Batch identity, input, aggregation, concurrency, and partial-result contracts require their own feature boundary. |
+| Operational tooling | Inspection, manual ambiguity resolution, retention, backup, and safe maintenance commands are not designed yet. |
+
+## What I would improve with another day
+
+1. Make late `429` evidence advance the durable service gate and consume retry budget under the same rules as an in-band response.
+2. Persist every submission and reconciliation observation together with the state transition that consumes it, then add corruption tests for the complete ledger.
+3. Separate intentional wait accounting from HTTP and SQLite elapsed time, and exercise cancellation at every durable side-effect boundary.
+4. Add a real multi-process shared-gate race test plus Linux and macOS CI coverage for SQLite locking and permission behavior.
+5. Add a read-only inspection command before expanding into manual resolution or Batch workflows.
+
+## Design documentation
+
+- [Product brief](docs/product/product-brief.md)
+- [Glossary](docs/product/glossary.md)
+- [Core entities](docs/domain/core-entities.md)
+- [Architecture overview](docs/architecture/architecture-overview.md)
+- [Architecture decisions](docs/architecture/decisions/)
+- [Simulated External Service specification](docs/specs/features/simulated-external-service.md)
+- [Submit a Single Job specification](docs/specs/features/submit-single-job.md)
+- [Reliable Job Submission specification](docs/specs/features/reliable-job-submission.md)
