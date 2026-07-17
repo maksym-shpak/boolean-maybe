@@ -2,14 +2,6 @@
 
 *A resilient CLI for a deliberately unreliable job submission API.*
 
-External APIs fail in a particularly awkward way: sometimes the server processes a request but the response never reaches the caller. A blind retry may create duplicate work, while treating every disconnect as failure may hide work that actually succeeded.
-
-`boolean-maybe` explores how a local command-line client can stay honest under that uncertainty. It records durable intent before HTTP, keeps the same Idempotency Key across retries, reconciles uncertain submissions with the remote service, and reports `AMBIGUOUS` when the available evidence cannot support a stronger answer.
-
-A Remote Request ID is useful evidence, but it is not the identity of a local Job and is not assumed to be unique. The authoritative local identity is the Job; each SubmissionAttempt preserves what was observed during one submission attempt.
-
-The repository is a guided journey from product intent through domain and architecture decisions to executable code and tests. Its implemented command handles one logical Job at a time. Batch orchestration and production-service concerns remain outside the current boundary.
-
 ## How to read this repository
 
 1. The [product brief](docs/product/product-brief.md) defines the user problem, product principles, and deliberate limits.
