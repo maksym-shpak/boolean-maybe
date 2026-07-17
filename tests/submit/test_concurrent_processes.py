@@ -94,15 +94,15 @@ def test_concurrent_same_key_same_payload_creates_exactly_one_job(
 
     succeeded = [b for b in bodies if b.get("outcome") == "succeeded"]
     already_completed = [b for b in bodies if b.get("outcome") == "already_completed"]
-    job_not_eligible = [b for b in bodies if b.get("outcome") == "job_not_eligible"]
+    job_in_progress = [b for b in bodies if b.get("outcome") == "job_in_progress"]
 
     # Exactly one process initiated the HTTP submission; every other process
-    # either replays the completed result or observes an ineligible Job.
+    # either replays the completed result or observes an actively-owned Job.
     assert len(succeeded) == 1
-    assert len(already_completed) + len(job_not_eligible) == 3
+    assert len(already_completed) + len(job_in_progress) == 3
     for body in already_completed:
         assert body["submitted"] is False
-    for body in job_not_eligible:
+    for body in job_in_progress:
         assert body["submitted"] is False
 
 

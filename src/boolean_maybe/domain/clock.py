@@ -34,3 +34,13 @@ def format_timestamp(instant: datetime) -> str:
 
 def add_seconds(instant: datetime, seconds: float) -> datetime:
     return instant + timedelta(seconds=seconds)
+
+
+def add_milliseconds(instant: datetime, milliseconds: int) -> datetime:
+    return instant + timedelta(milliseconds=milliseconds)
+
+
+def parse_timestamp(text: str) -> datetime:
+    """Parse a `format_timestamp` string back into a UTC `datetime`."""
+
+    return datetime.strptime(text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)

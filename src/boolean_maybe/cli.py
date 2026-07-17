@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .application import submit as submit_workflow
+from .application import history_projection, submit as submit_workflow
 
 PROG = "boolean-maybe"
 DEFAULT_DATABASE_RELATIVE = Path(".boolean-maybe") / "boolean-maybe.sqlite3"
@@ -146,16 +146,41 @@ def _emit_validation_error(exc: submit_workflow.ValidationError) -> None:
 def _emit_unexpected_failure() -> None:
     _print_json(
         {
-            "outcome": "submission_incomplete",
+            "outcome": "local_persistence_failure",
             "submitted": True,
             "idempotency_key": None,
             "state": None,
             "error": {
-                "code": "submission_incomplete",
+                "code": "local_persistence_failure",
                 "message": "an unexpected internal error occurred",
             },
         }
     )
+
+
+def _attempt_history_json(
+    items: list[history_projection.AttemptHistoryItem] | None,
+) -> list[dict[str, object]] | None:
+    if items is None:
+        return None
+    return [
+        {
+            "attempt_id": item.attempt_id,
+            "attempt_number": item.attempt_number,
+            "state": item.state,
+            "started_at": item.started_at,
+            "completed_at": item.completed_at,
+            "http_status": item.http_status,
+            "remote_request_id": item.remote_request_id,
+            "error_category": item.error_category,
+            "retry_after_ms": item.retry_after_ms,
+            "reconciliation": {
+                "request_count": item.reconciliation.request_count,
+                "final_category": item.reconciliation.final_category,
+            },
+        }
+        for item in items
+    ]
 
 
 def _emit_outcome(outcome: submit_workflow.SubmitOutcome) -> int:
@@ -178,19 +203,29 @@ def _emit_outcome(outcome: submit_workflow.SubmitOutcome) -> int:
                     "payload_digest": outcome.payload_digest,
                     "remote_request_id": outcome.remote_request_id,
                 },
+                "reconciliation_requests": outcome.reconciliation_requests,
+                "attempt_history": _attempt_history_json(outcome.attempt_history) or [],
             }
         )
         return 0
 
-    _print_json(
-        {
-            "outcome": outcome.outcome,
-            "submitted": outcome.submitted,
-            "idempotency_key": outcome.idempotency_key,
-            "state": outcome.state,
-            "error": {"code": outcome.outcome, "message": outcome.message},
-        }
-    )
+    body: dict[str, object] = {
+        "outcome": outcome.outcome,
+        "submitted": outcome.submitted,
+        "idempotency_key": outcome.idempotency_key,
+        "state": outcome.state,
+        "reconciliation_requests": outcome.reconciliation_requests,
+        "error": {"code": outcome.outcome, "message": outcome.message},
+    }
+    # `job_id` and `attempt_history` are omitted entirely (not rendered as
+    # `null`) when the failure occurred before a Job was known, matching
+    # the existing envelope's precedent for genuinely unavailable fields.
+    if outcome.job_id is not None:
+        body["job_id"] = outcome.job_id
+    history_json = _attempt_history_json(outcome.attempt_history)
+    if history_json is not None:
+        body["attempt_history"] = history_json
+    _print_json(body)
     return 1
 
 

@@ -1,6 +1,6 @@
-"""Persistence tests: PRAGMA verification, migration version 1, reopen,
-newer-version refusal, schema-mismatch detection, concurrent initialization,
-and busy-timeout exhaustion.
+"""Persistence tests: PRAGMA verification, migration versions 1 and 2,
+reopen, newer-version refusal, schema-mismatch detection, concurrent
+initialization, and busy-timeout exhaustion.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from boolean_maybe.persistence import schema
 from boolean_maybe.persistence.errors import PersistenceError, SchemaVersionError
 
 
-def test_fresh_database_migrates_to_version_1_with_verified_pragmas(
+def test_fresh_database_migrates_to_version_2_with_verified_pragmas(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "nested" / "boolean-maybe.sqlite3"
@@ -26,7 +26,7 @@ def test_fresh_database_migrates_to_version_1_with_verified_pragmas(
     try:
         assert db_path.exists()
         (version,) = conn.execute("PRAGMA user_version").fetchone()
-        assert version == schema.SCHEMA_VERSION
+        assert version == schema.SCHEMA_VERSION == 2
 
         (journal_mode,) = conn.execute("PRAGMA journal_mode").fetchone()
         assert str(journal_mode).lower() == "delete"
@@ -43,12 +43,17 @@ def test_fresh_database_migrates_to_version_1_with_verified_pragmas(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
-        assert {"jobs", "submission_attempts"} <= tables
+        assert {
+            "jobs",
+            "submission_attempts",
+            "service_rate_limit_gate",
+            "attempt_observations",
+        } <= tables
     finally:
         conn.close()
 
 
-def test_reopening_version_1_is_non_destructive(tmp_path: Path) -> None:
+def test_reopening_version_2_is_non_destructive(tmp_path: Path) -> None:
     db_path = tmp_path / "boolean-maybe.sqlite3"
     first = connection_mod.open_connection(db_path)
     try:
@@ -71,6 +76,109 @@ def test_reopening_version_1_is_non_destructive(tmp_path: Path) -> None:
         second.close()
 
 
+def test_version_1_database_upgrades_to_version_2_preserving_existing_rows(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "boolean-maybe.sqlite3"
+
+    # Simulate a database created by an older release that only ever applied
+    # migration 1, without going through `connection_mod.open_connection`
+    # (which would already apply both migrations today).
+    legacy = sqlite3.connect(str(db_path), autocommit=True, timeout=0)
+    try:
+        legacy.execute("BEGIN EXCLUSIVE")
+        for statement in schema.MIGRATION_1_STATEMENTS:
+            legacy.execute(statement)
+        legacy.execute("PRAGMA user_version = 1")
+        legacy.execute("COMMIT")
+
+        legacy.execute("BEGIN IMMEDIATE")
+        legacy.execute(
+            "INSERT INTO jobs (job_id, idempotency_key, payload_canonical, state, created_at, updated_at) "
+            "VALUES ('job-1', 'key-1', X'7b7d', 'SUCCEEDED', '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')"
+        )
+        legacy.execute("COMMIT")
+    finally:
+        legacy.close()
+
+    upgraded = connection_mod.open_connection(db_path)
+    try:
+        (version,) = upgraded.execute("PRAGMA user_version").fetchone()
+        assert version == 2
+
+        row = upgraded.execute(
+            "SELECT job_id, state FROM jobs WHERE job_id = 'job-1'"
+        ).fetchone()
+        assert row == ("job-1", "SUCCEEDED")
+
+        tables = {
+            row[0]
+            for row in upgraded.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        assert {"service_rate_limit_gate", "attempt_observations"} <= tables
+    finally:
+        upgraded.close()
+
+
+def test_tampered_version_1_database_is_refused_not_silently_upgraded(
+    tmp_path: Path,
+) -> None:
+    # A version-1 database whose `jobs` table has drifted from the original
+    # migration 1 definition (here: an extra column) must fail closed rather
+    # than being silently migrated straight through to version 2.
+    db_path = tmp_path / "boolean-maybe.sqlite3"
+
+    legacy = sqlite3.connect(str(db_path), autocommit=True, timeout=0)
+    try:
+        legacy.execute("BEGIN EXCLUSIVE")
+        legacy.execute(
+            """
+            CREATE TABLE jobs (
+                job_id TEXT PRIMARY KEY,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                payload_canonical BLOB NOT NULL,
+                state TEXT NOT NULL CHECK (
+                    state IN (
+                        'PENDING', 'SUBMITTING', 'RETRY_SCHEDULED',
+                        'SUCCEEDED', 'FAILED_PERMANENT', 'AMBIGUOUS'
+                    )
+                ),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                unexpected_column TEXT,
+                CHECK (length(payload_canonical) <= 1048576),
+                CHECK (updated_at >= created_at)
+            )
+            """
+        )
+        for statement in schema.MIGRATION_1_STATEMENTS[1:]:
+            legacy.execute(statement)
+        legacy.execute("PRAGMA user_version = 1")
+        legacy.execute("COMMIT")
+    finally:
+        legacy.close()
+
+    with pytest.raises(PersistenceError):
+        connection_mod.open_connection(db_path)
+
+    # The corrupted database must not have been silently upgraded.
+    verify_only = sqlite3.connect(str(db_path), autocommit=True, timeout=0)
+    try:
+        (version,) = verify_only.execute("PRAGMA user_version").fetchone()
+        assert version == 1
+        tables = {
+            row[0]
+            for row in verify_only.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        assert "service_rate_limit_gate" not in tables
+    finally:
+        verify_only.close()
+
+
 def test_newer_schema_version_is_refused(tmp_path: Path) -> None:
     db_path = tmp_path / "boolean-maybe.sqlite3"
     conn = connection_mod.open_connection(db_path)
@@ -81,11 +189,51 @@ def test_newer_schema_version_is_refused(tmp_path: Path) -> None:
         connection_mod.open_connection(db_path)
 
 
-def test_schema_mismatch_at_version_1_is_refused(tmp_path: Path) -> None:
+def test_schema_mismatch_on_jobs_table_is_refused(tmp_path: Path) -> None:
     db_path = tmp_path / "boolean-maybe.sqlite3"
     conn = connection_mod.open_connection(db_path)
     conn.execute("BEGIN IMMEDIATE")
     conn.execute("ALTER TABLE jobs ADD COLUMN unexpected_column TEXT")
+    conn.execute("COMMIT")
+    conn.close()
+
+    with pytest.raises(SchemaVersionError):
+        connection_mod.open_connection(db_path)
+
+
+def test_schema_mismatch_on_service_rate_limit_gate_is_refused(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "boolean-maybe.sqlite3"
+    conn = connection_mod.open_connection(db_path)
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute(
+        "ALTER TABLE service_rate_limit_gate ADD COLUMN unexpected_column TEXT"
+    )
+    conn.execute("COMMIT")
+    conn.close()
+
+    with pytest.raises(SchemaVersionError):
+        connection_mod.open_connection(db_path)
+
+
+def test_missing_attempt_observations_table_is_refused(tmp_path: Path) -> None:
+    db_path = tmp_path / "boolean-maybe.sqlite3"
+    conn = connection_mod.open_connection(db_path)
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("DROP TABLE attempt_observations")
+    conn.execute("COMMIT")
+    conn.close()
+
+    with pytest.raises(SchemaVersionError):
+        connection_mod.open_connection(db_path)
+
+
+def test_missing_attempt_observations_index_is_refused(tmp_path: Path) -> None:
+    db_path = tmp_path / "boolean-maybe.sqlite3"
+    conn = connection_mod.open_connection(db_path)
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("DROP INDEX attempt_observations_attempt_order")
     conn.execute("COMMIT")
     conn.close()
 
@@ -124,10 +272,6 @@ def test_non_partial_replacement_index_is_refused(tmp_path: Path) -> None:
         "CREATE UNIQUE INDEX one_started_attempt_per_job ON submission_attempts(job_id)"
     )
     conn.execute("COMMIT")
-    conn.close()
-
-    with pytest.raises(SchemaVersionError):
-        connection_mod.open_connection(db_path)
     conn.close()
 
     with pytest.raises(SchemaVersionError):

@@ -178,6 +178,8 @@ Failure scenarios are selected by a simulator-owned deterministic plan using ope
 
 A later CLI invocation triggers an application workflow that reads authoritative local state through the persistence boundary. An unexpired invocation lease identifies active ownership; after expiry, a recovery workflow may claim the attempt only by atomically advancing its fencing generation. The claimed attempt is always `MAYBE_SENT` and is never automatically resubmitted. Recovery uses the bounded reconciliation sequence from ADR-006 and preserves ambiguity unless authoritative ADR-003 evidence supports success or permanent conflict. Exact commands, lease timing, and late-evidence presentation belong to approved feature specifications.
 
+`docs/specs/features/reliable-job-submission.md` defines the concrete instance of this recovery workflow for `submit`: the exact CLI recovery trigger (an equivalent `SUBMITTING` Job selected by the same explicit idempotency key, never a background scan), the 60-second renewable lease and 20-second renewal cadence, the injected-clock/monotonic-clock/random-source time-source strategy, the 10-second takeover quarantine and exact-evidence recheck, and the late-evidence append/consume presentation (sanitized, append-only, never reclassifying a completed attempt). Other future features remain free to define their own equivalent contracts through their own approved specifications.
+
 ## Data and State Ownership
 
 | Data or state | Authority | Architectural rule |
@@ -250,7 +252,7 @@ The following questions require ADRs before affected features are implemented:
 
 Exact CLI commands, input methods, response schemas, the positive Batch concurrency limit and its user-facing configurability, Batch ordering and duplicate presentation, persistence schemas and coordination parameters, manual recovery/reconciliation operations, and explicit user operations from `AMBIGUOUS` belong to approved feature specifications rather than this overview.
 
-`docs/specs/features/submit-single-job.md` defines the first such concrete contract: the `submit` command, its JSON result and exit-code schemas, and SQLite migration version `1`. Later features may add commands and migration versions without changing this overview.
+`docs/specs/features/submit-single-job.md` defines the first such concrete contract: the `submit` command, its JSON result and exit-code schemas, and SQLite migration version `1`. `docs/specs/features/reliable-job-submission.md` defines the second: SQLite migration version `2` (the durable service-wide rate-limit gate and sanitized `attempt_observations` history), the bounded submission/reconciliation retry and backoff formulas, and the recovery/lease/late-evidence contract referenced above. Later features may add commands and migration versions without changing this overview.
 
 ## Related Architecture Decisions
 

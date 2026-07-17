@@ -36,7 +36,7 @@ def test_replay_200_for_an_equivalent_resubmission(live_simulator) -> None:
     assert second.remote_request_id == first.remote_request_id
 
 
-def test_non_equivalent_conflict_is_not_success(live_simulator) -> None:
+def test_non_equivalent_conflict_is_idempotency_conflict(live_simulator) -> None:
     first_bytes = canonical_json.canonicalize({"a": 1})
     first_digest = canonical_json.payload_digest(first_bytes)
     client.submit_job(
@@ -53,8 +53,7 @@ def test_non_equivalent_conflict_is_not_success(live_simulator) -> None:
         second_digest,
     )
 
-    assert isinstance(outcome, client.SubmitHttpFailure)
-    assert outcome.dispatch_may_have_begun is True
+    assert outcome == client.SubmitHttpIdempotencyConflict()
 
 
 def test_digest_mismatch_against_authoritative_evidence_is_not_success(
@@ -71,7 +70,7 @@ def test_digest_mismatch_against_authoritative_evidence_is_not_success(
         expected_digest="sha256:" + "0" * 64,
     )
 
-    assert isinstance(outcome, client.SubmitHttpFailure)
+    assert isinstance(outcome, client.SubmitHttpProtocolUncertain)
     assert real_digest != "sha256:" + "0" * 64
 
 
@@ -83,11 +82,11 @@ def test_connection_refused_is_proven_not_sent(unused_tcp_port: int) -> None:
         "127.0.0.1", unused_tcp_port, "job-a", canonical_bytes, digest
     )
 
-    assert isinstance(outcome, client.SubmitHttpFailure)
+    assert isinstance(outcome, client.SubmitHttpTransportFailure)
     assert outcome.dispatch_may_have_begun is False
 
 
-def test_rate_limited_response_is_not_success(make_live_simulator) -> None:
+def test_rate_limited_response_is_rate_limited(make_live_simulator) -> None:
     running = make_live_simulator(
         {
             "version": 1,
@@ -107,5 +106,37 @@ def test_rate_limited_response_is_not_success(make_live_simulator) -> None:
         running.host, running.port, "job-a", canonical_bytes, digest
     )
 
-    assert isinstance(outcome, client.SubmitHttpFailure)
-    assert outcome.dispatch_may_have_begun is True
+    assert isinstance(outcome, client.SubmitHttpRateLimited)
+    assert outcome.retry_after_values == ("1",)
+
+    # `429_then_success`: ordinal 2 uses normal behavior.
+    second = client.submit_job(
+        running.host, running.port, "job-a", canonical_bytes, digest
+    )
+    assert isinstance(second, client.SubmitHttpSuccess)
+    assert second.http_status == 201
+
+
+def test_delivered_500_from_500_then_success_is_server_error(
+    make_live_simulator,
+) -> None:
+    running = make_live_simulator(
+        {
+            "version": 1,
+            "rules": [
+                {
+                    "operation": "submission",
+                    "idempotency_key": "job-a",
+                    "scenario": "500_then_success",
+                }
+            ],
+        }
+    )
+    canonical_bytes = canonical_json.canonicalize({"a": 1})
+    digest = canonical_json.payload_digest(canonical_bytes)
+
+    outcome = client.submit_job(
+        running.host, running.port, "job-a", canonical_bytes, digest
+    )
+
+    assert outcome == client.SubmitHttpServerError(http_status=500)

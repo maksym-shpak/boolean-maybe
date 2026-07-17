@@ -53,7 +53,7 @@ The `submit` command validates one inline JSON object, resolves an Idempotency K
 
 ### 3. Reliability hardening
 
-The current code hardens that same workflow rather than introducing a second path. It adds error classification, bounded submission and reconciliation budgets, jittered waits, `Retry-After`, a durable service-wide gate, restart takeover with fencing, late-observation storage, structured attempt history, and explicit operational outcomes. The target contract is complete in [Reliable Job Submission](docs/specs/features/reliable-job-submission.md), but the implementation is still partially hardened; the status table below distinguishes implemented paths from known remaining gaps.
+The current code hardens that same workflow rather than introducing a second path. It adds error classification, bounded submission and reconciliation budgets, jittered waits, `Retry-After`, a durable service-wide gate, restart takeover with fencing, late-observation storage and consumption (including a late `429` under the same budget/gate rules as an in-band response), structured attempt history backed by an atomically recorded observation per request, stage-aware cancellation handling, and explicit operational outcomes. The target contract in [Reliable Job Submission](docs/specs/features/reliable-job-submission.md) is implemented; the status table below still distinguishes covered paths from genuinely deferred work (multi-process race depth, cross-platform CI, Batch, operational tooling).
 
 ## Current implementation status
 
@@ -62,9 +62,9 @@ The current code hardens that same workflow rather than introducing a second pat
 | Packaging and CLI bootstrap | Implemented | Python 3.12 package with `boolean-maybe` and `boolean-maybe-simulator` entry points. |
 | Deterministic loopback simulator | Implemented | Submission, reconciliation, idempotent replay, conflicts, ten failure presets, and redacted JSONL logs. |
 | Durable single-Job happy path | Implemented | Validation, migration v1, pre/post HTTP transactions, success, and stored replay. |
-| Core retry and reconciliation flow | Partially implemented | Main `429`, proven-not-sent, uncertain-dispatch, bounded reconciliation, and ambiguity paths exist; edge-condition hardening remains. |
-| Restart recovery and fencing | Partially implemented | Expired-lease takeover and late evidence exist, with remaining cancellation, timing, and evidence-consumption gaps. |
-| Complete structured observation ledger | Specified | The reliability contract defines it; not every submission/reconciliation observation is yet durably and atomically represented. |
+| Core retry and reconciliation flow | Implemented | `429`/proven-not-sent retry, uncertain-dispatch reconciliation, ambiguity, and late-`429` evidence all follow the same budget/gate rules as a live observation. |
+| Restart recovery and fencing | Implemented | Expired-lease takeover, late-evidence append/consumption, and stage-aware cancellation (before/after dispatch, during a wait) are covered by dedicated tests. |
+| Complete structured observation ledger | Implemented | Every submission and reconciliation observation is recorded atomically with the state transition it explains; migration version 1 is verified before version 2 is trusted. |
 | Machine-readable command results | Implemented | Compact JSON on stdout, stable exit-code classes, attempt history, and per-invocation reconciliation count. |
 | CLI structured operational logging | Deferred | The simulator logs structured events; the client CLI currently exposes result JSON and concise diagnostics, not a separate operational log stream. |
 | Batch submission and bounded Batch concurrency | Deferred | The current command accepts one logical Job only. |
@@ -196,20 +196,17 @@ The usable surface is deliberately narrow: one inline canonicalizable JSON objec
 
 | Area | Why it remains deferred |
 | --- | --- |
-| Complete late-observation handling | Late `429` evidence and all reconciliation categories still need the same durable gate/budget semantics as live observations. |
-| Atomic structured evidence ledger | Observation recording and terminal transitions need stronger all-or-nothing crash behavior and stricter corruption validation. |
-| Cancellation and timing hardening | Stage-aware cancellation, intentional-wait accounting, lease-renewal cadence, and wall-clock edge cases need broader proof. |
-| Migration-chain hardening | Each historical schema version should be verified before a later migration is allowed to trust it. |
+| Deeper multi-process race coverage | Gate-maximum and authorization-race behavior is proven at the transaction/application level with injected clocks; a real concurrent-process shared-gate race test is not yet added. |
+| Broader subprocess crash matrix | `test_crash_boundary.py` covers the core restart/recovery boundaries; extending it to every combination (retry sleep, recovery takeover, reconciliation observation/finalization) across real process kills remains future work. |
+| Cross-platform CI | Windows-specific timing and locking behavior is covered locally; Linux and macOS CI runs are not yet configured. |
 | Batch orchestration | Batch identity, input, aggregation, concurrency, and partial-result contracts require their own feature boundary. |
 | Operational tooling | Inspection, manual ambiguity resolution, retention, backup, and safe maintenance commands are not designed yet. |
 
 ## What I would improve with another day
 
-1. Make late `429` evidence advance the durable service gate and consume retry budget under the same rules as an in-band response.
-2. Persist every submission and reconciliation observation together with the state transition that consumes it, then add corruption tests for the complete ledger.
-3. Separate intentional wait accounting from HTTP and SQLite elapsed time, and exercise cancellation at every durable side-effect boundary.
-4. Add a real multi-process shared-gate race test plus Linux and macOS CI coverage for SQLite locking and permission behavior.
-5. Add a read-only inspection command before expanding into manual resolution or Batch workflows.
+1. Add a real multi-process shared-gate race test plus Linux and macOS CI coverage for SQLite locking and permission behavior.
+2. Extend the subprocess crash-boundary matrix to real process kills at every durable side-effect boundary (retry sleep, recovery takeover, reconciliation observation/finalization), complementing the existing fake-clock application-level cancellation tests.
+3. Add a read-only inspection command before expanding into manual resolution or Batch workflows.
 
 ## Design documentation
 

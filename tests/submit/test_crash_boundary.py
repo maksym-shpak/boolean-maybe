@@ -195,7 +195,7 @@ def test_process_killed_during_http_leaves_submitting_and_blocks_reattempt(
 
     assert second.returncode == 1
     body = json.loads(second.stdout)
-    assert body["outcome"] == "job_not_eligible"
+    assert body["outcome"] == "job_in_progress"
     assert body["submitted"] is False
     assert body["state"] == "SUBMITTING"
 
@@ -479,6 +479,6 @@ def test_process_killed_after_remote_success_during_finalization_leaves_submitti
 
     assert second.returncode == 1
     body = json.loads(second.stdout)
-    assert body["outcome"] == "job_not_eligible"
+    assert body["outcome"] == "job_in_progress"
     assert body["submitted"] is False
     assert body["state"] == "SUBMITTING"

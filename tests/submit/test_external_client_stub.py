@@ -120,8 +120,7 @@ def test_oversized_response_body_is_not_authoritative_success(stub_server) -> No
 
     outcome = _submit(server.port)
 
-    assert isinstance(outcome, client.SubmitHttpFailure)
-    assert outcome.dispatch_may_have_begun is True
+    assert isinstance(outcome, client.SubmitHttpProtocolUncertain)
 
 
 def _valid_201_body() -> bytes:
@@ -152,8 +151,7 @@ def test_wrong_content_type_is_not_success(stub_server) -> None:
 
     outcome = _submit(server.port)
 
-    assert isinstance(outcome, client.SubmitHttpFailure)
-    assert outcome.dispatch_may_have_begun is True
+    assert isinstance(outcome, client.SubmitHttpProtocolUncertain)
     assert "content-type" in outcome.reason.lower()
 
 
@@ -168,7 +166,7 @@ def test_missing_content_type_is_not_success(stub_server) -> None:
 
     outcome = _submit(server.port)
 
-    assert isinstance(outcome, client.SubmitHttpFailure)
+    assert isinstance(outcome, client.SubmitHttpProtocolUncertain)
 
 
 def test_response_with_unexpected_extra_field_is_not_success(stub_server) -> None:
@@ -195,8 +193,7 @@ def test_response_with_unexpected_extra_field_is_not_success(stub_server) -> Non
 
     outcome = _submit(server.port)
 
-    assert isinstance(outcome, client.SubmitHttpFailure)
-    assert outcome.dispatch_may_have_begun is True
+    assert isinstance(outcome, client.SubmitHttpProtocolUncertain)
 
 
 def test_malformed_json_body_is_not_success(stub_server) -> None:
@@ -211,7 +208,7 @@ def test_malformed_json_body_is_not_success(stub_server) -> None:
 
     outcome = _submit(server.port)
 
-    assert isinstance(outcome, client.SubmitHttpFailure)
+    assert isinstance(outcome, client.SubmitHttpProtocolUncertain)
 
 
 def test_wrong_replayed_flag_for_201_is_not_success(stub_server) -> None:
@@ -238,7 +235,7 @@ def test_wrong_replayed_flag_for_201_is_not_success(stub_server) -> None:
 
     outcome = _submit(server.port)
 
-    assert isinstance(outcome, client.SubmitHttpFailure)
+    assert isinstance(outcome, client.SubmitHttpProtocolUncertain)
 
 
 def test_incomplete_response_is_not_success(stub_server) -> None:
@@ -253,8 +250,11 @@ def test_incomplete_response_is_not_success(stub_server) -> None:
 
     outcome = _submit(server.port)
 
-    assert isinstance(outcome, client.SubmitHttpFailure)
-    assert outcome.dispatch_may_have_begun is True
+    # `read1()` returns the partial bytes actually received before the
+    # server closed the connection rather than raising -- this is a
+    # received-but-invalid response (malformed JSON), not a transport-level
+    # failure, so it is `MAYBE_SENT`-equivalent via `protocol_uncertain`.
+    assert isinstance(outcome, client.SubmitHttpProtocolUncertain)
 
 
 def test_connection_close_slow_dribbled_body_is_bounded_by_the_deadline() -> None:
@@ -306,7 +306,8 @@ def test_connection_close_slow_dribbled_body_is_bounded_by_the_deadline() -> Non
         )
         elapsed = time.monotonic() - started
 
-        assert isinstance(outcome, client.SubmitHttpFailure)
+        assert isinstance(outcome, client.SubmitHttpTransportFailure)
+        assert outcome.dispatch_may_have_begun is True
         # Bounded close to the requested 0.5s deadline (with margin for slow
         # CI), not the ~4s full dribble duration a silently-ignored deadline
         # would allow.
@@ -316,7 +317,10 @@ def test_connection_close_slow_dribbled_body_is_bounded_by_the_deadline() -> Non
         thread.join(timeout=5.0)
 
 
-def test_unexpected_status_is_not_success(stub_server) -> None:
+def test_delivered_500_is_server_error_regardless_of_body(stub_server) -> None:
+    # A delivered 5xx is inherently ambiguous (`server_uncertain`): the
+    # status alone is sufficient, and the response body is never inspected
+    # -- even a malformed or empty body must not change this classification.
     body = b'{"error":{"code":"simulated_server_error","message":"boom"}}'
     response = (
         b"HTTP/1.1 500 Internal Server Error\r\n"
@@ -328,8 +332,196 @@ def test_unexpected_status_is_not_success(stub_server) -> None:
 
     outcome = _submit(server.port)
 
-    assert isinstance(outcome, client.SubmitHttpFailure)
-    assert outcome.dispatch_may_have_begun is True
+    assert outcome == client.SubmitHttpServerError(http_status=500)
+
+
+def test_delivered_500_with_malformed_body_is_still_server_error(stub_server) -> None:
+    body = b"not json at all"
+    response = (
+        b"HTTP/1.1 503 Service Unavailable\r\n"
+        b"Content-Type: text/plain\r\n"
+        + f"Content-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+    server = stub_server(response)
+
+    outcome = _submit(server.port)
+
+    assert outcome == client.SubmitHttpServerError(http_status=503)
+
+
+def test_unexpected_status_is_protocol_uncertain(stub_server) -> None:
+    body = b'{"idempotency_key":"job-a","status":"not_found"}'
+    response = (
+        b"HTTP/1.1 404 Not Found\r\n"
+        b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+    server = stub_server(response)
+
+    outcome = _submit(server.port)
+
+    assert isinstance(outcome, client.SubmitHttpProtocolUncertain)
+
+
+def test_redirect_status_is_protocol_uncertain(stub_server) -> None:
+    response = b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1/elsewhere\r\nContent-Length: 0\r\n\r\n"
+    server = stub_server(response)
+
+    outcome = _submit(server.port)
+
+    assert isinstance(outcome, client.SubmitHttpProtocolUncertain)
+
+
+def test_delivered_400_with_malformed_body_is_protocol_uncertain(stub_server) -> None:
+    body = b"not a well-formed error envelope"
+    response = (
+        b"HTTP/1.1 400 Bad Request\r\n"
+        b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+    server = stub_server(response)
+
+    outcome = _submit(server.port)
+
+    assert isinstance(outcome, client.SubmitHttpProtocolUncertain)
+
+
+def test_delivered_400_with_well_formed_body_is_validation_rejected(
+    stub_server,
+) -> None:
+    body = b'{"error":{"code":"invalid_request","message":"nope"}}'
+    response = (
+        b"HTTP/1.1 400 Bad Request\r\n"
+        b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+    server = stub_server(response)
+
+    outcome = _submit(server.port)
+
+    assert outcome == client.SubmitHttpValidationRejected()
+
+
+def test_delivered_429_with_missing_retry_after_is_still_rate_limited(
+    stub_server,
+) -> None:
+    # `Retry-After` absence is a `retry_policy`-level concern (falls back to
+    # policy jitter); the client itself must still classify the status/body.
+    body = b'{"error":{"code":"rate_limited","message":"slow down"}}'
+    response = (
+        b"HTTP/1.1 429 Too Many Requests\r\n"
+        b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+    server = stub_server(response)
+
+    outcome = _submit(server.port)
+
+    assert outcome == client.SubmitHttpRateLimited(retry_after_values=())
+
+
+def test_delivered_429_with_retry_after_header_is_captured_unparsed(
+    stub_server,
+) -> None:
+    body = b'{"error":{"code":"rate_limited","message":"slow down"}}'
+    response = (
+        b"HTTP/1.1 429 Too Many Requests\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Retry-After: 1\r\n" + f"Content-Length: {len(body)}\r\n\r\n".encode() + body
+    )
+    server = stub_server(response)
+
+    outcome = _submit(server.port)
+
+    assert outcome == client.SubmitHttpRateLimited(retry_after_values=("1",))
+
+
+def test_delivered_429_with_repeated_retry_after_headers_are_all_captured(
+    stub_server,
+) -> None:
+    # `domain.retry_after.parse_retry_after` rejects more than one occurrence;
+    # the transport layer must surface every occurrence rather than silently
+    # picking or joining one, so that rejection can actually happen.
+    body = b'{"error":{"code":"rate_limited","message":"slow down"}}'
+    response = (
+        b"HTTP/1.1 429 Too Many Requests\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Retry-After: 1\r\n"
+        b"Retry-After: 2\r\n" + f"Content-Length: {len(body)}\r\n\r\n".encode() + body
+    )
+    server = stub_server(response)
+
+    outcome = _submit(server.port)
+
+    assert outcome == client.SubmitHttpRateLimited(retry_after_values=("1", "2"))
+
+
+def test_delivered_429_with_wrong_code_is_protocol_uncertain(stub_server) -> None:
+    body = b'{"error":{"code":"simulated_server_error","message":"boom"}}'
+    response = (
+        b"HTTP/1.1 429 Too Many Requests\r\n"
+        b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+    server = stub_server(response)
+
+    outcome = _submit(server.port)
+
+    assert isinstance(outcome, client.SubmitHttpProtocolUncertain)
+
+
+def test_delivered_409_with_well_formed_body_is_idempotency_conflict(
+    stub_server,
+) -> None:
+    expected_digest = canonical_json.payload_digest(
+        canonical_json.canonicalize({"a": 1})
+    )
+    body = (
+        b'{"error":{"code":"idempotency_conflict","message":"nope",'
+        b'"stored_payload_digest":"sha256:' + b"0" * 64 + b'",'
+        b'"submitted_payload_digest":"' + expected_digest.encode() + b'"}}'
+    )
+    response = (
+        b"HTTP/1.1 409 Conflict\r\n"
+        b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+    server = stub_server(response)
+
+    outcome = _submit(server.port)
+
+    assert outcome == client.SubmitHttpIdempotencyConflict()
+
+
+def test_delivered_409_with_mismatched_submitted_digest_is_protocol_uncertain(
+    stub_server,
+) -> None:
+    # If the server's own "submitted_payload_digest" does not match what we
+    # actually sent, this response is not authoritative evidence about our
+    # request -- it must not be trusted as a genuine conflict.
+    body = (
+        b'{"error":{"code":"idempotency_conflict","message":"nope",'
+        b'"stored_payload_digest":"sha256:' + b"0" * 64 + b'",'
+        b'"submitted_payload_digest":"sha256:' + b"1" * 64 + b'"}}'
+    )
+    response = (
+        b"HTTP/1.1 409 Conflict\r\n"
+        b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+    server = stub_server(response)
+
+    outcome = _submit(server.port)
+
+    assert isinstance(outcome, client.SubmitHttpProtocolUncertain)
 
 
 def test_empty_string_remote_request_id_is_accepted(stub_server) -> None:
@@ -390,4 +582,4 @@ def test_missing_remote_request_id_is_not_success(stub_server) -> None:
 
     outcome = _submit(server.port)
 
-    assert isinstance(outcome, client.SubmitHttpFailure)
+    assert isinstance(outcome, client.SubmitHttpProtocolUncertain)
