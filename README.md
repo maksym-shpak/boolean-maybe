@@ -4,7 +4,7 @@ A resilient command-line application for submitting and managing jobs through a 
 
 This repository currently provides:
 
-* the `boolean-maybe` packaging baseline (installable console entry point; command behavior is defined by later approved feature specifications);
+* `boolean-maybe submit`, the first end-to-end single-Job submission command, described below;
 * `boolean-maybe-simulator`, a small local HTTP simulator of that unreliable external service, described below.
 
 See `docs/product/product-brief.md`, `docs/product/glossary.md`, `docs/domain/core-entities.md`, and `docs/architecture/` for product, domain, and architecture context.
@@ -21,6 +21,37 @@ uv sync --locked
 ```
 
 This installs both console entry points, `boolean-maybe` and `boolean-maybe-simulator`, into the project's managed virtual environment using the committed lockfile.
+
+## Submitting a Job (`boolean-maybe submit`)
+
+`submit` proves the product's foundational path for one Job Entry: validate, durably record the Job and a `STARTED` attempt *before* any HTTP request, submit once to the Simulated External Service, atomically record success, and print a stable JSON result. A later invocation with the same key and an equivalent Job Entry replays the persisted successful result without another attempt or HTTP request. This first feature intentionally does not implement retry, reconciliation, or recovery of an interrupted submission; see `docs/specs/features/submit-single-job.md` for the complete contract.
+
+Command syntax:
+
+```text
+boolean-maybe submit --job-entry JSON [--idempotency-key KEY] [--database PATH] [--service-url URL]
+```
+
+* `--job-entry` is one inline UTF-8 JSON object (any canonicalizable object, including `{}`); it is rejected before any database is opened or HTTP request is sent if it is not valid, canonicalizable, RFC 8785/I-JSON-compliant input up to 1 MiB.
+* `--idempotency-key` is optional: 1-128 characters from `A-Z a-z 0-9 . _ ~ -`. When omitted, a `job_<32 lowercase hex>` key is generated (never derived from the Job Entry).
+* `--database` defaults to `.boolean-maybe/boolean-maybe.sqlite3` relative to the current directory. A missing parent directory is created; an existing directory or file is never replaced or deleted.
+* `--service-url` defaults to `http://127.0.0.1:8080` and accepts only an unauthenticated loopback `http` origin (no hostnames, credentials, query, fragment, or non-root path).
+
+Example, against a simulator started with `uv run --locked boolean-maybe-simulator`:
+
+```sh
+uv run --locked boolean-maybe submit --job-entry '{"work":"example"}'
+```
+
+```json
+{"outcome":"succeeded","submitted":true,"job_id":"...","idempotency_key":"job_...","state":"SUCCEEDED","attempt":{"attempt_id":"...","attempt_number":1,"http_status":201,"remote_request_id":"remote-..."},"result":{"status":"processed","payload_digest":"sha256:...","remote_request_id":"remote-..."}}
+```
+
+Repeating the same command with `--idempotency-key job-a` twice returns `outcome: "already_completed"` and `submitted: false` on the second call, without contacting the simulator again.
+
+Exit codes: `0` for `succeeded`, `already_completed`, or help; `1` when a valid command could not complete successfully (`idempotency_conflict`, `job_not_eligible`, `submission_incomplete`, or another local/operational failure); `2` when command syntax or Job Entry/Idempotency Key/database path/service URL validation fails before any product work begins.
+
+**This feature provides no application-level encryption or permission hardening.** The SQLite database may contain sensitive Job Entry payloads; protect the database file with local filesystem permissions.
 
 ## Simulated External Service
 

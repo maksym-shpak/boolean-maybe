@@ -250,6 +250,8 @@ The following questions require ADRs before affected features are implemented:
 
 Exact CLI commands, input methods, response schemas, the positive Batch concurrency limit and its user-facing configurability, Batch ordering and duplicate presentation, persistence schemas and coordination parameters, manual recovery/reconciliation operations, and explicit user operations from `AMBIGUOUS` belong to approved feature specifications rather than this overview.
 
+`docs/specs/features/submit-single-job.md` defines the first such concrete contract: the `submit` command, its JSON result and exit-code schemas, and SQLite migration version `1`. Later features may add commands and migration versions without changing this overview.
+
 ## Related Architecture Decisions
 
 * `docs/architecture/decisions/001-python-runtime-packaging-and-development-tooling.md` — Python runtime, packaging, and development tooling baseline.

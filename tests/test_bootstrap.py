@@ -8,6 +8,8 @@ CLI behavior, output, or exit-code contract.
 
 from importlib.metadata import entry_points
 
+import pytest
+
 import boolean_maybe
 
 
@@ -22,4 +24,10 @@ def test_console_script_entry_point_resolves_and_runs() -> None:
 
     assert len(matches) == 1
     assert matches[0].value == "boolean_maybe.cli:main"
-    matches[0].load()()  # runs without raising; no return/exit-code contract asserted
+
+    # The `submit` feature defines a real exit-code contract; invoking with
+    # no arguments prints help and exits `0` rather than merely "not raising".
+    main = matches[0].load()
+    with pytest.raises(SystemExit) as exc_info:
+        main([])
+    assert exc_info.value.code == 0

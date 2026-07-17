@@ -172,11 +172,10 @@ The product is successful when:
 * The application workflow generates an idempotency key by default, while the CLI also accepts a user-provided key. An idempotency key must never be derived from the Job Entry payload.
 * The simulated external service supports idempotent submission and reconciliation by idempotency key. Both endpoints remain operationally unreliable so that requests may still produce retryable or ambiguous client-observed outcomes.
 * When a request matches an existing `SUCCEEDED` Job by idempotency key and equivalent Job Entry, the CLI returns the stored result with `outcome` set to `already_completed`, `submitted` set to `false`, and exit code `0`. In this result, `submitted=false` means the current CLI invocation did not send another external request.
+* `docs/specs/features/submit-single-job.md` defines the first `submit` command: any canonicalizable JSON object is an accepted Job Entry with no required fields, and inline JSON is its only input method. Additional required fields or input methods (file, standard input) remain open for later commands.
 
 ## Open Product Questions
 
-* What exact data fields constitute a job entry?
-* Which CLI input methods are required: inline JSON, file input, standard input, or a subset of these?
 * Which operations should be available for ambiguous jobs: inspection only, explicit retry, reconciliation, or manual resolution?
 * What level of batch concurrency is appropriate as the default?
 * Should human-readable output be supported in addition to machine-readable JSON command results?

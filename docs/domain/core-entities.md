@@ -329,13 +329,12 @@ Whether Batch is persisted, its fields and lifecycle, resume behavior, input ord
 
 ## Open Questions
 
+`docs/specs/features/submit-single-job.md` narrows three of these for the single-Job `submit` command: the first Job Entry payload is any canonicalizable JSON object with no required or optional fields, the accepted `idempotency_key` grammar is 1-128 characters from `A-Z a-z 0-9 . _ ~ -`, and inline JSON is the only supported input method for that command. Later features may still add required payload fields or additional CLI input methods.
+
 The following questions must be resolved before implementation of the affected features:
 
-1. What is the exact feature-specific schema of a Job Entry JSON object?
-2. What length, character, and validation rules apply to `idempotency_key`?
-3. Which explicit operations, if any, may transition a Job out of `AMBIGUOUS`?
-4. Which CLI input methods are required for Job Entries?
-5. Is Batch persisted, and what identity, fields, states, resume lifecycle, membership storage, and Job cardinality does it require?
-6. Should Batch processing preserve original input ordering, and how should duplicate entries be represented?
-7. Are aggregate Batch results derived at read time or persisted as snapshots?
-8. What retention or deletion policy applies to Jobs, SubmissionAttempts, and any persisted Batch data?
+1. Which explicit operations, if any, may transition a Job out of `AMBIGUOUS`?
+2. Is Batch persisted, and what identity, fields, states, resume lifecycle, membership storage, and Job cardinality does it require?
+3. Should Batch processing preserve original input ordering, and how should duplicate entries be represented?
+4. Are aggregate Batch results derived at read time or persisted as snapshots?
+5. What retention or deletion policy applies to Jobs, SubmissionAttempts, and any persisted Batch data?
