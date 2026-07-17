@@ -401,18 +401,18 @@ sequenceDiagram
 
   C->>W: Job Entry, optional key, database, service origin
   W->>W: Parse, validate, canonicalize, resolve key
-  W->>P: BEGIN IMMEDIATE; resolve/create Job
+  W->>P: BEGIN IMMEDIATE, resolve/create Job
   alt Matching SUCCEEDED Job
     P-->>W: Persisted successful evidence
-    W-->>C: already_completed JSON; exit 0
+    W-->>C: already_completed JSON, exit 0
   else New eligible Job
-    W->>P: Insert Job + STARTED attempt; set SUBMITTING; COMMIT
+    W->>P: Insert Job + STARTED attempt, set SUBMITTING, COMMIT
     W->>H: Submit exact persisted key and canonical payload
     H->>S: POST /jobs
     S-->>H: Authoritative 201 or replay 200
     H-->>W: Validated success evidence
-    W->>P: BEGIN IMMEDIATE; complete attempt + Job; COMMIT
-    W-->>C: succeeded JSON; exit 0
+    W->>P: BEGIN IMMEDIATE, complete attempt + Job, COMMIT
+    W-->>C: succeeded JSON, exit 0
   end
 ```
 
